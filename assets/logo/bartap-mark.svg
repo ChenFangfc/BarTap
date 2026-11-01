@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-24 -24 438 247" width="438" height="247">
+  <!-- BarTap mark: the menu bar line turning down at its corner, and a tap rising toward it. -->
+  <g fill="none" stroke="#2B2B2E" stroke-width="48" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M0 0H339A51 51 0 0 1 390 51V199"/>
+    <path d="M56 199L188 67"/>
+  </g>
+</svg>
