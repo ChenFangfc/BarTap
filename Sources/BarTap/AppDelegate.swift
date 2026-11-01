@@ -20,7 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     private var appMenuRanges: (pid: pid_t, rects: [CGRect])?
     private var screenWork: DispatchWorkItem?
     private var placementRetries = 0
+    private var placementWaits = 0
+    private var pendingPlacementCheck: DispatchWorkItem?
+    /// A (re)placement is still being checked or corrected (tests wait for it).
+    private(set) var placementSettling = false
+    private var lastMeasuredToggle: CGRect?
     private var crowdHintShown = false
+    private var trustWatch: Timer?
     private var started = false
 
     // MARK: Launch
@@ -67,11 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         reveal.refresh()
 
         let statsController = StatsController(settings: settings)
-        statsController.toggleKeyProvider = { [weak self] in self?.toggleOrderKey() }
-        statsController.toggleRightDistance = { [weak self] in
-            guard let t = self?.bar?.ownFrames().toggle, t.width > 0 else { return nil }
-            return -t.maxX
+        statsController.toggleKeyProvider = {
+            UserDefaults.standard.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) as? Double
         }
+        statsController.toggleKeyEstimate = { [weak self] in self?.toggleOrderKey() }
         statsController.openSettings = { [weak self] in self?.showSettings() }
         stats = statsController
         statsController.apply()
@@ -87,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         // items have a stable anchor even when no position was seeded.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.recordPositionsIfMissing() }
         if firstRun {
+            placementSettling = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.verifyFirstPlacement() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in self?.showOnboarding() }
         }
@@ -110,31 +116,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         let statsWidth = stats?.shownWidth() ?? StatsController.estimatedWidth(settings)
         // The toggle (logo glyph, 21 pt + macOS padding) is ~37 pt wide.
         if let seeds = Placement.initialSeeds(screens: screens, windows: windows, toggleWidth: 38 + statsWidth, extraDrop: extraDrop) {
-            StatusBarController.seed(seeds, in: .standard)
+            storeOwnSeeds(seeds)
         } else {
             StatusBarController.clearStoredPositions(.standard)
         }
         settings.didPlaceItems = true
     }
 
-    /// First run only: if the seeded toggle still ended up behind the notch, move one more icon
-    /// into Hidden and try again (twice at most).
+    /// After (re)placing our items: the toggle must be drawn on every bar that draws anything (a
+    /// notch or the front app's menus can crowd it out). macOS orders items by stored keys, which on
+    /// a multi-display Mac don't always match geometry, so a seed can land further left than
+    /// measured. Correct the toggle's key by the measured overshoot and try again (3 times at most).
     private func verifyFirstPlacement() {
+        pendingPlacementCheck?.cancel()   // one check at a time
+        pendingPlacementCheck = nil
+        guard placementRetries < 3 else { placementSettling = false; return }
+        let storedKey = UserDefaults.standard.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) as? Double
         let windows = SystemQueries.windows(onScreenOnly: false)
         let screens = SystemQueries.screens(windows: windows)
-        guard let notched = screens.first(where: { $0.notch != nil }) else { return }
-        let row = MenuBarGeometry.row(on: notched, windows: windows)
-        guard row.contains(where: \.isOnScreen) else { return }   // that bar is not visible right now
-        let drawn = ToggleVisibility.isDrawn(bar.ownFrames().toggle, row: row, on: notched)
-        guard drawn == false, placementRetries < 2 else { return }
+        let toggle = bar.ownFrames().toggle
+        var bars: [(screen: ScreenInfo, row: [WindowInfo], drawn: Bool?)] = []
+        for screen in screens {
+            let row = MenuBarGeometry.row(on: screen, windows: windows)
+            guard row.contains(where: \.isOnScreen) else { continue }   // that bar is not visible right now
+            bars.append((screen, row, ToggleVisibility.isDrawn(toggle, row: row, on: screen)
+                ?? ToggleVisibility.besideCollapsedDivider(toggle, row: row, windows: windows, on: screen)?.isOnScreen))
+        }
+        // Measure once our items have stored positions, the stats items (which sit right of the
+        // toggle and push it left) are in, and the bar has stopped moving: the toggle sits where
+        // it sat half a second ago and every visible bar shows it, drawn or not. Laying out a few
+        // new items on three displays takes macOS a couple of seconds.
+        let arriving = stats.map { $0.awaitingItems || Date().timeIntervalSince($0.itemsCreatedAt) < 0.8 } ?? false
+        let moving = toggle != lastMeasuredToggle || bars.contains { $0.drawn == nil }
+        lastMeasuredToggle = toggle
+        if storedKey == nil || toggle.width <= 0 || arriving || moving, placementWaits < 30 {
+            placementWaits += 1
+            let check = DispatchWorkItem { [weak self] in self?.verifyFirstPlacement() }
+            pendingPlacementCheck = check
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: check)
+            return
+        }
+        placementWaits = 0
+        lastMeasuredToggle = nil
+        guard toggle.width > 0, let key = storedKey else { placementSettling = false; return }
+        var overshoot: CGFloat = 0
+        for (screen, row, drawn) in bars {
+            guard drawn == false, let leftmost = row.first(where: \.isOnScreen) else { continue }
+            // Drawing stops at the leftmost drawn icon: the toggle's left edge has to come back to it.
+            let limit = MenuBarGeometry.rightDistance(of: leftmost.bounds, on: screen) + leftmost.bounds.width
+            overshoot = max(overshoot, -toggle.minX - limit + 4)
+        }
+        guard overshoot > 0 else { placementSettling = false; return }
         placementRetries += 1
         bar.removeAllItems()
+        stats?.removeItemsForReplacement()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
-            self.seedInitialPositions(extraDrop: self.placementRetries)
+            self.storeOwnSeeds(Placement.Seeds(anchorRightDistance: max(0.5, key - Double(overshoot))))
             self.bar.createItems(alwaysHidden: self.settings.alwaysHiddenEnabled)
             self.reveal.refresh()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.verifyFirstPlacement() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.stats?.apply()
+                self?.verifyFirstPlacement()
+            }
         }
     }
 
@@ -142,14 +186,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     /// stored positions (the user has not arranged them yet), so place them properly once.
     @discardableResult
     private func runPendingPlacementIfPossible() -> Bool {
-        guard settings.placementPending,
-              UserDefaults.standard.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) == nil else {
+        let stored = UserDefaults.standard.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) as? Double
+        // A toggle the user has ⌘-dragged since (its key no longer the provisional one) stays put.
+        let untouched = stored == nil || settings.provisionalToggleKey.map { abs($0 - stored!) < 0.001 } == true
+        guard settings.placementPending, untouched else {
             settings.placementPending = false
+            settings.provisionalToggleKey = nil
             return false
         }
         let windows = SystemQueries.windows(onScreenOnly: false)
         guard !notchedBarHidden(SystemQueries.screens(windows: windows), windows) else { return false }
         settings.placementPending = false
+        settings.provisionalToggleKey = nil
         resetPositions()
         return true
     }
@@ -178,6 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         stats?.removeItemsForReplacement()
         StatusBarController.clearStoredPositions(.standard)
         placementRetries = 0
+        placementWaits = 0
+        lastMeasuredToggle = nil
+        pendingPlacementCheck?.cancel()
+        placementSettling = true
         // Wait for macOS to re-lay out the bar without our items before measuring it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             guard let self else { return }
@@ -185,9 +237,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             self.bar.createItems(alwaysHidden: self.settings.alwaysHiddenEnabled)
             self.reveal.refresh()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.verifyFirstPlacement()
                 self?.recordPositionsIfMissing()
                 self?.stats?.apply()   // recreate stats items next to the new toggle position
+                self?.verifyFirstPlacement()
             }
         }
     }
@@ -203,11 +255,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         return t.width > 0 ? Double(-t.maxX) + 7 : nil
     }
 
-    private func recordPositionsIfMissing() {
+    /// Without stored keys macOS may re-add our items in any order (a Control Center restart
+    /// does), so record them once laid out. While a first-run placement waits for the notched
+    /// bar, they are provisional (see runPendingPlacementIfPossible).
+    private func recordPositionsIfMissing(attempt: Int = 0) {
         let d = UserDefaults.standard
-        guard !settings.placementPending, d.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) == nil,
-              reveal.layoutProblem == nil, let key = toggleOrderKey() else { return }
-        StatusBarController.seed(Placement.Seeds(anchorRightDistance: key), in: d)
+        guard d.object(forKey: StatusBarController.preferredPositionKey("tb_toggle")) == nil else { return }
+        guard reveal.layoutProblem == nil, let key = toggleOrderKey() else {
+            // Not laid out yet (or briefly misreported): look again shortly.
+            if attempt < 5 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.recordPositionsIfMissing(attempt: attempt + 1) }
+            }
+            return
+        }
+        storeOwnSeeds(Placement.Seeds(anchorRightDistance: key))
+    }
+
+    /// Stores our items' positions. Keys BarTap writes while a first-run placement waits are
+    /// provisional: that placement still runs unless the user moves the toggle meanwhile.
+    private func storeOwnSeeds(_ seeds: Placement.Seeds) {
+        StatusBarController.seed(seeds, in: .standard)
+        if settings.placementPending { settings.provisionalToggleKey = seeds.toggle }
     }
 
     // MARK: Conflicts & onboarding
@@ -465,6 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         let panel = shelfPanel ?? ShelfPanel()
         panel.onActivate = { [weak self] item in self?.activate(item) }
         panel.onOpenSettings = { [weak self] in self?.requestAccessibility() }
+        panel.onRequestImages = { ItemImages.request() }
         panel.onClosed = { [weak self] in self?.configureGestures() }
         shelfPanel = panel
         let windows = SystemQueries.windows(onScreenOnly: false)
@@ -472,10 +541,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         guard let screen = SystemQueries.screen(containingCG: SystemQueries.pointerCG, in: screens) else { return }
         let toggle = bar.ownFrames().toggle
         let anchorX = toggle.width > 0 ? ToggleVisibility.toggleMaxX(toggle, on: screen) : screen.frame.maxX - 8
+        // Only on the notched display itself (Accessibility reports icons in its coordinates when
+        // it is the main display); elsewhere those icons are visible.
+        let notch = screen.frame.origin == .zero ? screen.notch : nil
         let show = { [weak self] (items: [BarItem]) in
-            let hidden = items.filter { $0.section != .shown }
-            panel.present(items: hidden, trusted: AXCatalog.isTrusted, on: screen, anchorX: anchorX)
+            // Hidden icons, plus shown ones that sit behind the notch (macOS draws them nowhere).
+            let listed = items.filter { item in
+                item.section != .shown || notch.map { $0.overlaps(item.frame.minX...item.frame.maxX) } == true
+            }
+            panel.present(items: listed, trusted: AXCatalog.isTrusted, on: screen, anchorX: anchorX,
+                          appearance: self?.bar.toggleItem?.button?.effectiveAppearance)
             self?.configureGestures()
+            ItemImages.capture(listed) { images in if panel.isVisible { panel.updateImages(images) } }
         }
         if AXCatalog.isTrusted { catalog.snapshot(completion: show) } else { show([]) }
     }
@@ -617,6 +694,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     func requestAccessibility() {
         AXCatalog.requestTrust()
         AXCatalog.openAccessibilitySettings()
+        watchForTrust()
+    }
+
+    func statsSnapshot() -> StatsSnapshot? { stats?.latest }
+
+    func rereadAIHistory() { stats?.rereadAIHistory() }
+
+    func resetAccessibility() {
+        AXCatalog.resetTrust()
+        requestAccessibility()
+    }
+
+    /// After a request, notice the grant as soon as it happens (no relaunch needed). Polls once a
+    /// second for at most three minutes, and only after the user asked for access.
+    private func watchForTrust() {
+        trustWatch?.invalidate()
+        let deadline = Date().addingTimeInterval(180)
+        trustWatch = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
+            if AXCatalog.isTrusted {
+                timer.invalidate()
+                self?.trustWatch = nil
+                NotificationCenter.default.post(name: .barTapTrustChanged, object: nil)
+                Toast.show(L("Accessibility is on: search and the shelf are ready"), symbol: "checkmark.circle")
+            } else if Date() > deadline {
+                timer.invalidate()
+                self?.trustWatch = nil
+            }
+        }
     }
 
     func pickColor() { ColorPicker.pick(format: settings.colorFormat) }
@@ -688,11 +793,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "busy": reveal.currentBusyReason()?.rawValue ?? "",
             "lastBusy": reveal.lastBusyReason?.rawValue ?? "",
             "axTrusted": AXCatalog.isTrusted,
+            "lastPress": catalog.lastPress,
             "memoryMB": ProcessStats.memoryMB(),
             "cpuSeconds": ProcessStats.cpuSeconds(),
             "settingsOpen": settingsWC != nil,
             "settingsControllersAlive": SettingsWindowController.liveCount,
             "resetCount": resetCount,
+            "placementSettling": placementSettling,
             "jitter": jitterResults,
             "commits": reveal.commits,
             "watchdogRuns": reveal.watchdogRuns,
@@ -710,6 +817,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     func closeSettingsForTesting() { settingsWC?.close() }
 
     func debugSetHiddenLength(_ v: CGFloat) { bar.hiddenItem?.length = v }
+
+    /// What Accessibility sees in the menu bar, as JSON (debug; local only).
+    func debugCatalog() {
+        catalog.snapshot { items in
+            let rows = items.map { ["app": $0.appName, "section": "\($0.section)", "rd": Int($0.order)] as [String: Any] }
+            let url = DebugRender.dir.deletingLastPathComponent().appendingPathComponent("catalog-classified.json")
+            if let data = try? JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted]) { try? data.write(to: url) }
+        }
+        catalog.rawDump { rows in
+            let screens = SystemQueries.screens().map { ["x": Double($0.frame.minX), "y": Double($0.frame.minY), "w": Double($0.frame.width),
+                                                         "h": Double($0.frame.height), "bar": Double($0.menuBarHeight)] }
+            let url = DebugRender.dir.deletingLastPathComponent().appendingPathComponent("catalog.json")
+            if let data = try? JSONSerialization.data(withJSONObject: ["items": rows, "screens": screens], options: [.prettyPrinted]) {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    /// Opens the first icon whose app name matches, the way the shelf does (debug).
+    func debugPress(_ appName: String) {
+        catalog.snapshot { [weak self] items in
+            let matches = items.filter { $0.appName.localizedCaseInsensitiveContains(appName) }
+            guard let item = matches.first(where: { $0.section != .shown }) ?? matches.first else { return }
+            self?.activate(item)
+        }
+    }
+
+    /// Closes an open menu through Accessibility (AXCancel), never with synthetic keys (debug).
+    func debugCloseMenu() {
+        catalog.cancelOpenMenu()
+        let system = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let start = focused, CFGetTypeID(start) == AXUIElementGetTypeID() else { return }
+        var element = start as! AXUIElement
+        for _ in 0..<6 {
+            var role: CFTypeRef?
+            AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            if (role as? String) == kAXMenuRole { AXUIElementPerformAction(element, kAXCancelAction as CFString); return }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success, let p = parent,
+                  CFGetTypeID(p) == AXUIElementGetTypeID() else { return }
+            element = p as! AXUIElement
+        }
+    }
+
+    /// Renders the shelf's current content to PNG (debug).
+    func debugRenderShelf() {
+        guard let panel = shelfPanel, panel.isVisible, let content = panel.contentView else { return }
+        let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)
+        if let rep { content.cacheDisplay(in: content.bounds, to: rep) }
+        DebugRender.write(rep, "shelf")
+    }
 
     /// Renders each settings pane to PNG (debug).
     func renderSettingsForDebug() {
@@ -729,6 +889,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             }
         }
         wc.close()
+        // The element editor sheet, for one module with a custom combination.
+        let editor = StatsElementEditor(module: .memory, settings: settings, liveSnapshot: { [weak self] in self?.stats?.latest })
+        if let content = editor.window?.contentView {
+            for dark in [false, true] { DebugRender.view(content, "settings_editor_\(dark ? "dark" : "light")", dark: dark) }
+        }
     }
 
     var lastMenuItemCount = 0
@@ -788,6 +953,14 @@ enum Debug {
             app.openSearch()
         case "shelf":
             app.openShelf()
+        case "catalog":
+            app.debugCatalog()
+        case "shelf-render":
+            app.debugRenderShelf()
+        case let w where w.hasPrefix("press-"):
+            app.debugPress(String(w.dropFirst("press-".count)))
+        case "close-menu":
+            app.debugCloseMenu()
         default:
             break
         }

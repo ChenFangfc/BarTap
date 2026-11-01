@@ -19,6 +19,7 @@ let package = Package(
                 .linkedFramework("Network"),
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("SystemConfiguration"),
+                .linkedFramework("ScreenCaptureKit"),
             ]
         ),
         // CommandLineTools ship without XCTest, so tests are a plain executable.

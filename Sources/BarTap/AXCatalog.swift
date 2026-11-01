@@ -40,6 +40,19 @@ final class AXCatalog {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
+    /// macOS keys the grant to the app's code signature. A grant recorded for another build shows
+    /// as switched on in System Settings, yet this build is not trusted, and relaunching doesn't
+    /// help. Removing the entry lets the next request register this build.
+    static func resetTrust() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        p.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "io.github.chenfangfc.BarTap"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+    }
+
     static func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
@@ -129,34 +142,37 @@ final class AXCatalog {
         return (out, false)
     }
 
-    /// Each app's AX positions come from its own proxy windows, which macOS may place on a
-    /// different display per app. Compare "distance from that bar's right edge" instead of raw x:
-    /// it is the same on every display. The display is identified by the frame's top edge (each
-    /// menu bar sits at its display's top), which works even for icons pushed far off-screen.
-    static func rightDistance(_ f: CGRect, screens: [ScreenInfo]) -> CGFloat? {
-        let rows = screens.filter { abs($0.frame.minY - f.minY) <= 2 }
-        guard !rows.isEmpty else { return nil }
-        let s = rows.first { $0.frame.minX <= f.maxX && f.maxX <= $0.frame.maxX + 1 }
-            ?? rows.min { abs($0.frame.maxX - f.maxX) < abs($1.frame.maxX - f.maxX) }!
-        return s.frame.maxX - f.maxX
+    /// Every app's extras, our own included, unclassified (debug).
+    func rawDump(completion: @escaping ([[String: Any]]) -> Void) {
+        let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }
+            .map { ($0.processIdentifier, $0.bundleIdentifier ?? "", $0.localizedName ?? "") }
+        queue.async {
+            var rows: [[String: Any]] = []
+            for (pid, bundle, name) in apps {
+                for item in Self.items(pid: pid, bundleID: bundle, appName: name).items {
+                    rows.append(["app": name, "id": item.identifier ?? "", "title": item.title,
+                                 "x": Double(item.frame.minX), "y": Double(item.frame.minY), "w": Double(item.frame.width), "h": Double(item.frame.height)])
+                }
+            }
+            DispatchQueue.main.async { completion(rows) }
+        }
     }
 
-    /// Dividers grow leftwards from a fixed right edge, so an icon is hidden when its right edge
-    /// is at or beyond the divider's left edge (measured from the right).
+    /// Sections from comparing every icon with our own items (see `MenuBarSections`); icons in
+    /// no menu bar are dropped: they can't be revealed or opened from here.
     private static func classify(_ items: inout [BarItem], own: [String: CGRect], screens: [ScreenInfo]) {
-        guard let hidden = own["bartap.hidden"], let hiddenRD = rightDistance(hidden, screens: screens) else { return }
-        let hiddenLeft = hiddenRD + hidden.width
-        let alwaysLeft = own["bartap.always"].flatMap { a in rightDistance(a, screens: screens).map { $0 + a.width } }
-        for i in items.indices {
-            guard let rd = rightDistance(items[i].frame, screens: screens) else { continue }
-            items[i].order = rd
-            if let a = alwaysLeft, rd >= a - 1 {
-                items[i].section = .alwaysHidden
-            } else if rd >= hiddenLeft - 1 {
-                items[i].section = .hidden
-            } else {
-                items[i].section = .shown
+        guard let toggle = own["bartap.toggle"], let hidden = own["bartap.hidden"] else { items.removeAll(); return }
+        let result = MenuBarSections.classify(items.map(\.frame), toggle: toggle, hidden: hidden, always: own["bartap.always"], screens: screens)
+        items = zip(items, result).compactMap { item, r in
+            guard let r else { return nil }
+            var item = item
+            item.order = r.rd
+            switch r.section {
+            case .shown: item.section = .shown
+            case .hidden: item.section = .hidden
+            case .alwaysHidden: item.section = .alwaysHidden
             }
+            return item
         }
         // Left to right, as in the menu bar.
         items.sort { $0.order > $1.order }
@@ -164,15 +180,54 @@ final class AXCatalog {
 
     /// "Clicks" an icon through Accessibility (AXPress), which opens its menu without moving the
     /// pointer. Menus run modally inside the target app, so a timeout here usually means success.
-    func press(_ item: BarItem, completion: @escaping (Bool) -> Void) {
+    /// Result of the last press, for the debug dump.
+    private(set) var lastPress = ""
+    private(set) var lastPressed: AXUIElement?
+
+    /// Cancels any menu that a menu bar icon has open (Accessibility only; no synthetic keys).
+    func cancelOpenMenu() {
+        let pids = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }.map(\.processIdentifier)
         queue.async {
+            for pid in pids {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.2)
+                var bar: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &bar) == .success, let bar,
+                      CFGetTypeID(bar) == AXUIElementGetTypeID() else { continue }
+                var extras: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(bar as! AXUIElement, kAXChildrenAttribute as CFString, &extras) == .success,
+                      let items = extras as? [AXUIElement] else { continue }
+                for item in items {
+                    var children: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(item, kAXChildrenAttribute as CFString, &children) == .success,
+                          let list = children as? [AXUIElement] else { continue }
+                    for child in list {
+                        var role: CFTypeRef?
+                        AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+                        if (role as? String) == kAXMenuRole { AXUIElementPerformAction(child, kAXCancelAction as CFString) }
+                    }
+                }
+            }
+        }
+    }
+
+    func press(_ item: BarItem, completion: @escaping (Bool) -> Void) {
+        queue.async { [weak self] in
             AXUIElementSetMessagingTimeout(item.element, 0.5)
             var err = AXUIElementPerformAction(item.element, kAXPressAction as CFString)
+            let first = err
             if err == .actionUnsupported || err == .attributeUnsupported {
                 err = AXUIElementPerformAction(item.element, "AXShowMenu" as CFString)
             }
+            var actions: CFArray?
+            AXUIElementCopyActionNames(item.element, &actions)
             let ok = err == .success || err == .cannotComplete
-            DispatchQueue.main.async { completion(ok) }
+            let note = "\(item.appName): press=\(first.rawValue) final=\(err.rawValue) actions=\((actions as? [String]) ?? []) frame=\(item.frame)"
+            DispatchQueue.main.async {
+                self?.lastPress = note
+                self?.lastPressed = item.element
+                completion(ok)
+            }
         }
     }
 

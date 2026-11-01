@@ -137,6 +137,15 @@ public final class Settings {
     /// display asleep, full screen): place the items as soon as it is.
     public var placementPending: Bool { get { bool("placementPending") } set { defaults.set(newValue, forKey: "placementPending") } }
 
+    /// The toggle position BarTap recorded while that placement waits. The keys keep our items'
+    /// order stable meanwhile; the placement still runs if the toggle is still there.
+    public var provisionalToggleKey: Double? {
+        get { defaults.object(forKey: "provisionalToggleKey") as? Double }
+        set {
+            if let v = newValue { defaults.set(v, forKey: "provisionalToggleKey") } else { defaults.removeObject(forKey: "provisionalToggleKey") }
+        }
+    }
+
     // MARK: Rules
     public var rules: RuleSettings {
         get {

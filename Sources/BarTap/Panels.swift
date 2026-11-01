@@ -203,22 +203,30 @@ final class SearchPanel: FloatingPanel, NSSearchFieldDelegate, NSTableViewDataSo
 
 // MARK: - Shelf
 
-/// A strip under the menu bar listing hidden icons (the safe counterpart of a "bar below the
-/// menu bar"): clicking one reveals its section and opens it via Accessibility. Nothing is moved.
+/// A strip under the menu bar listing hidden icons, like Bartender's bar below the menu bar:
+/// clicking one reveals its section and opens it via Accessibility. Nothing is moved, and the
+/// pointer is never touched. Real icon images need Screen Recording; until then, app icons.
 final class ShelfPanel: FloatingPanel {
     var onActivate: ((BarItem) -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onRequestImages: (() -> Void)?
     /// Lets the owner drop the outside-click monitor once the shelf is gone.
     var onClosed: (() -> Void)?
     private let stack = NSStackView()
     private var items: [BarItem] = []
+    private var buttons: [NSButton] = []
+    private var widths: [NSLayoutConstraint] = []
+    private var placement: (screen: ScreenInfo, anchorX: CGFloat)?
+    private static let iconHeight: CGFloat = 24
 
     init() {
         super.init(size: NSSize(width: 200, height: 40))
         level = .statusBar
+        (contentView as? NSVisualEffectView)?.material = .menu
         stack.orientation = .horizontal
-        stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
+        stack.spacing = 4
+        stack.alignment = .centerY
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
         contentView?.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -231,9 +239,13 @@ final class ShelfPanel: FloatingPanel {
 
     /// - Parameters:
     ///   - anchorX: CG x the shelf's right edge should align with (the toggle on that display).
-    func present(items: [BarItem], trusted: Bool, on screen: ScreenInfo, anchorX: CGFloat) {
+    ///   - appearance: the menu bar's, so captured icons keep their contrast.
+    func present(items: [BarItem], trusted: Bool, on screen: ScreenInfo, anchorX: CGFloat, appearance: NSAppearance?) {
         self.items = items
+        self.appearance = appearance
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        buttons.removeAll()
+        widths.removeAll()
         if !trusted {
             let b = NSButton(title: L("Allow Accessibility to list hidden icons here…"), target: self, action: #selector(openSettings))
             b.bezelStyle = .inline
@@ -251,20 +263,50 @@ final class ShelfPanel: FloatingPanel {
                 b.toolTip = item.title == item.appName ? item.title : "\(item.title) — \(item.appName)"
                 b.setAccessibilityLabel(b.toolTip)
                 b.translatesAutoresizingMaskIntoConstraints = false
-                b.widthAnchor.constraint(equalToConstant: 30).isActive = true
-                b.heightAnchor.constraint(equalToConstant: 26).isActive = true
+                let width = b.widthAnchor.constraint(equalToConstant: 30)
+                width.isActive = true
+                b.heightAnchor.constraint(equalToConstant: Self.iconHeight + 2).isActive = true
+                stack.addArrangedSubview(b)
+                buttons.append(b)
+                widths.append(width)
+            }
+            if !ItemImages.permitted {
+                let b = NSButton(title: L("Show real icons…"), target: self, action: #selector(requestImages))
+                b.bezelStyle = .inline
+                b.controlSize = .small
+                b.toolTip = L("Allow Screen Recording so the shelf can show each icon as it looks in the menu bar.")
                 stack.addArrangedSubview(b)
             }
         }
+        placement = (screen, anchorX)
+        layoutAndPlace()
+        orderFrontRegardless()
+    }
+
+    /// Swaps in captured images, keyed by `BarItem.key`, at menu bar size.
+    func updateImages(_ images: [String: NSImage]) {
+        guard !images.isEmpty else { return }
+        for (i, item) in items.enumerated() where i < buttons.count {
+            guard let img = images[item.key], img.size.height > 0 else { continue }
+            let scale = min(1, Self.iconHeight / img.size.height)
+            let size = NSSize(width: img.size.width * scale, height: img.size.height * scale)
+            let sized = NSImage(size: size, flipped: false) { r in img.draw(in: r); return true }
+            buttons[i].image = sized
+            widths[i].constant = max(size.width, 16)
+        }
+        layoutAndPlace()
+    }
+
+    private func layoutAndPlace() {
+        guard let (screen, anchorX) = placement else { return }
         stack.layoutSubtreeIfNeeded()
         let width = min(max(stack.fittingSize.width, 60), screen.frame.width - 40)
-        let height: CGFloat = 36
-        // Place just under the bar, right-aligned to the toggle, clamped to the display.
+        let height: CGFloat = Self.iconHeight + 12
+        // Just under the bar, right-aligned to the toggle, clamped to the display.
         let maxX = min(max(anchorX, screen.frame.minX + width + 8), screen.frame.maxX - 8)
         let cgRect = CGRect(x: maxX - width, y: screen.frame.minY + screen.menuBarHeight + 6, width: width, height: height)
         let cocoaY = SystemQueries.mainScreenHeight - cgRect.maxY
         setFrame(NSRect(x: cgRect.minX, y: cocoaY, width: width, height: height), display: true)
-        orderFrontRegardless()
     }
 
     @objc private func clicked(_ sender: NSButton) {
@@ -279,6 +321,12 @@ final class ShelfPanel: FloatingPanel {
         orderOut(nil)
         onClosed?()
         onOpenSettings?()
+    }
+
+    @objc private func requestImages() {
+        orderOut(nil)
+        onClosed?()
+        onRequestImages?()
     }
 
     func containsCG(_ p: CGPoint) -> Bool {

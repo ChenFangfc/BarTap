@@ -98,7 +98,7 @@ final class RevealController {
             // The watchdog saw the toggle vanish after collapsing: stay open (no collapse/expand
             // cycle) until a refresh or a rearrangement clears it.
             if toggleUndrawn && Date() >= blockedUntil { toggleUndrawn = false }   // cooldown over: try again
-            let problem = toggleUndrawn ? .hiddenRightOfToggle : LayoutValidator.check(frames)
+            let problem = toggleUndrawn ? .hiddenRightOfToggle : LayoutValidator.check(frames, keys: bar.ownKeys())
             layoutProblem = problem
             model.layoutBlocked = problem != nil
             // Frames can be mid-layout right after items are created or displays change; look
@@ -118,13 +118,18 @@ final class RevealController {
     }
 
     private func scheduleRecheck() {
-        let limit = layoutProblem == .notReady ? 40 : 8
+        let notReady = layoutProblem == .notReady
+        // Fast at first. If the bar is still not laid out (a busy login can take longer than 10 s),
+        // keep looking every 2 s for a few more minutes instead of staying open for good.
+        let fast = notReady ? 40 : 8
+        let limit = notReady ? fast + 90 : fast
         guard recheckCount < limit else { return }
         recheckCount += 1
         retryWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.commit() }
         retryWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (layoutProblem == .notReady ? 0.25 : 0.5), execute: work)
+        let delay = recheckCount > fast ? 2.0 : (notReady ? 0.25 : 0.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Clears the recheck budget, e.g. after the user repaired the layout.
@@ -239,14 +244,16 @@ enum ToggleVisibility {
     enum Result { case drawn, undrawnEverywhere, inconclusive }
 
     static func check(_ toggle: CGRect) -> Result {
-        guard toggle.width > 0 else { return .inconclusive }
+        // A just-created item reports the rightmost slot until macOS lays it out; that slot is
+        // always Control Center's, so it says nothing about the toggle.
+        guard toggle.width > 0, -toggle.maxX >= 1 else { return .inconclusive }
         let windows = SystemQueries.windows(onScreenOnly: false)
         let screens = SystemQueries.screens(windows: windows)
         var conclusiveUndrawn = 0
         for s in screens {
             let row = MenuBarGeometry.row(on: s, windows: windows)
             guard row.contains(where: { $0.isOnScreen }) else { continue }   // bar hidden (full screen, auto-hide)
-            switch isDrawn(toggle, row: row, on: s) {
+            switch isDrawn(toggle, row: row, on: s) ?? besideCollapsedDivider(toggle, row: row, windows: windows, on: s)?.isOnScreen {
             case true?: return .drawn
             case false?: conclusiveUndrawn += 1
             case nil:
@@ -267,6 +274,19 @@ enum ToggleVisibility {
     static func isDrawn(_ toggle: CGRect, row: [WindowInfo], on screen: ScreenInfo) -> Bool? {
         guard toggle.width > 0 else { return nil }
         return MenuBarGeometry.window(atRightDistance: -toggle.maxX, width: toggle.width, on: screen, in: row, tolerance: 5)?.isOnScreen
+    }
+
+    /// The toggle when its proxy frame is stale (seen on macOS 26 after a relaunch, off by ~20 pt):
+    /// while collapsed it is the item touching the right edge of our collapsed divider, where the
+    /// row walk stops. Width must match closely and the slot must be near the proxy's.
+    static func besideCollapsedDivider(_ toggle: CGRect, row: [WindowInfo], windows: [WindowInfo], on screen: ScreenInfo) -> WindowInfo? {
+        guard toggle.width > 0, let first = row.first, abs(first.bounds.width - toggle.width) <= 1.5,
+              abs(MenuBarGeometry.rightDistance(of: first.bounds, on: screen) - (-toggle.maxX)) <= 48 else { return nil }
+        let touchesDivider = windows.contains {
+            $0.layer == WindowLevel.status && $0.bounds.width >= separatorWidthThreshold
+                && abs($0.bounds.minY - screen.frame.minY) <= 1 && abs($0.bounds.maxX - first.bounds.minX) <= 2.5
+        }
+        return touchesDivider ? first : nil
     }
 
     /// A collapsed divider can never fit, so it must never be drawn. If one is drawn, macOS chose

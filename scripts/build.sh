@@ -2,9 +2,15 @@
 # Builds dist/BarTap.app (universal) and dist/BarTap-<version>.dmg.
 # Gates: localization complete, unit tests pass, and the binary links none of the APIs that can
 # fake input, move the pointer or swallow clicks.
+#
+#   scripts/build.sh             # dist/BarTap.app + DMG
+#   scripts/build.sh --install   # ...then replace /Applications/BarTap.app and drop the dist copy,
+#                                #    so exactly one BarTap exists on the Mac
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-1.0.0}"
+INSTALL=0
+[ "${1:-}" = "--install" ] && INSTALL=1
+VERSION="${VERSION:-1.1.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 DIST=dist
 APP="$DIST/BarTap.app"
@@ -68,11 +74,26 @@ sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" Resources/Info.plist >
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/ai-prices.json "$APP/Contents/Resources/ai-prices.json"   # bundled model prices (LiteLLM snapshot)
 echo '"CFBundleDisplayName" = "BarTap";' > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 echo '"CFBundleDisplayName" = "BarTap";' > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
 
-echo "==> Sign (ad-hoc, hardened runtime)"
-codesign --force --options runtime --timestamp=none --sign - "$APP"
+# A stable identity keeps privacy grants (Accessibility, Screen Recording) across rebuilds: macOS
+# ties them to the signature, and an ad-hoc signature is just this exact binary's hash.
+KC="$HOME/Library/Keychains/bartap-signing.keychain-db"
+if [ -f "$KC" ] && [ -f .signing/keychain-password ]; then
+    echo "==> Sign (BarTap self-signed identity, hardened runtime)"
+    security unlock-keychain -p "$(cat .signing/keychain-password)" "$KC"
+    if ! security list-keychains -d user | grep -q bartap-signing; then
+        # shellcheck disable=SC2046
+        security list-keychains -d user -s $(security list-keychains -d user | tr -d '"') "$KC"
+    fi
+    IDENTITY="$(security find-identity -p codesigning "$KC" | awk '/BarTap Self-Signed Code Signing/ {print $2; exit}')"
+    codesign --force --options runtime --timestamp=none --keychain "$KC" --sign "$IDENTITY" "$APP"
+else
+    echo "==> Sign (ad-hoc, hardened runtime; run scripts/make_signing_identity.sh to keep privacy grants across builds)"
+    codesign --force --options runtime --timestamp=none --sign - "$APP"
+fi
 codesign --verify --strict --verbose=1 "$APP"
 
 if [ "${SKIP_DMG:-0}" != "1" ]; then
@@ -90,4 +111,19 @@ if [ "${SKIP_DMG:-0}" != "1" ]; then
     echo "    $DMG ($(du -h "$DMG" | cut -f1))"
 fi
 du -sh "$APP"
+
+if [ "$INSTALL" = "1" ]; then
+    echo "==> Install"
+    pkill -x BarTap 2>/dev/null || true
+    for _ in $(seq 1 50); do pgrep -x BarTap >/dev/null || break; sleep 0.1; done
+    rm -rf /Applications/BarTap.app
+    ditto "$APP" /Applications/BarTap.app
+    # Exactly one BarTap on the Mac: drop the staged copy and its LaunchServices record.
+    LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    "$LSR" -u "$APP" 2>/dev/null || true
+    rm -rf "$APP"
+    "$LSR" -f /Applications/BarTap.app
+    open -g /Applications/BarTap.app
+    echo "    installed /Applications/BarTap.app"
+fi
 echo "==> Done"

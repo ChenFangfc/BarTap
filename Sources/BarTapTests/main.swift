@@ -22,6 +22,17 @@ func test(_ name: String, _ body: () -> Void) {
     print(failures == before ? "✓ \(name)" : "✗ \(name)")
 }
 
+/// Throwaway defaults backed by a file in the temporary folder. A named suite would leave an
+/// empty plist in ~/Library/Preferences after every run, even after removePersistentDomain.
+func scratchDefaults() -> (defaults: UserDefaults, discard: () -> Void) {
+    let path = NSTemporaryDirectory() + "bartap-tests-\(UUID().uuidString).plist"
+    let d = UserDefaults(suiteName: path)!
+    return (d, {
+        CFPreferencesAppSynchronize(path as CFString)
+        try? FileManager.default.removeItem(atPath: path)
+    })
+}
+
 // MARK: Fixtures — real measurements from a MacBook Pro (notch) + 2 external displays, macOS 26.6
 
 let builtIn = ScreenInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), menuBarHeight: 33, notch: 771...956)
@@ -135,6 +146,49 @@ test("layout validator") {
     var noAlways = ok
     noAlways.alwaysHidden = nil
     expect(LayoutValidator.check(noAlways) == nil)
+}
+
+test("layout validator: stored keys decide the order, frames only readiness") {
+    let frames = OwnItemFrames(toggle: CGRect(x: -772, y: 0, width: 42, height: 33),
+                               hidden: CGRect(x: -730, y: 0, width: 24, height: 33), alwaysHidden: nil)
+    // Proxies swapped (seen on macOS 26) while the keys, and the real bar, are in order.
+    expect(LayoutValidator.check(frames) == .hiddenRightOfToggle, "proxies alone report the swap")
+    expect(LayoutValidator.check(frames, keys: OwnItemKeys(toggle: 368.5, hidden: 368.75, alwaysHidden: nil)) == nil)
+    expect(LayoutValidator.check(frames, keys: OwnItemKeys(toggle: 368.5, hidden: 368.25, alwaysHidden: nil)) == .hiddenRightOfToggle)
+    expect(LayoutValidator.check(frames, keys: OwnItemKeys(toggle: 368.5, hidden: 368.5, alwaysHidden: nil)) == .hiddenRightOfToggle, "a tie is not an order")
+    expect(LayoutValidator.check(frames, keys: OwnItemKeys(toggle: 368.5, hidden: 368.75, alwaysHidden: 368.6)) == .alwaysRightOfHidden)
+    expect(LayoutValidator.check(frames, keys: OwnItemKeys(toggle: 368.5, hidden: 368.75, alwaysHidden: 369)) == nil)
+    expect(LayoutValidator.check(OwnItemFrames(toggle: .zero, hidden: .zero, alwaysHidden: nil),
+                                 keys: OwnItemKeys(toggle: 1, hidden: 2, alwaysHidden: nil)) == .notReady, "no frames yet: not ready")
+    expect(LayoutValidator.check(frames, keys: nil) == .hiddenRightOfToggle, "no keys: fall back to the frames")
+}
+
+test("menu bar sections from Accessibility frames (macOS 26, three displays, notch)") {
+    // Frames as reported on a MacBook with two external displays (collapsed).
+    let screens = [ScreenInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), menuBarHeight: 33, notch: 771...956),
+                   ScreenInfo(id: 2, frame: CGRect(x: 0, y: -1692, width: 3008, height: 1692), menuBarHeight: 30),
+                   ScreenInfo(id: 3, frame: CGRect(x: -1440, y: -1443, width: 1440, height: 2560), menuBarHeight: 30)]
+    let toggle = CGRect(x: 984, y: 4.5, width: 39, height: 24)
+    let hidden = CGRect(x: -4024, y: 4.5, width: 5002, height: 24)
+    let frames = [CGRect(x: -4430, y: 3.5, width: 42, height: 26),     // hidden, far off the left edge
+                  CGRect(x: -4111, y: 4.5, width: 73, height: 24),     // hidden, just left of the divider
+                  CGRect(x: 1029, y: 4.5, width: 72, height: 24),      // shown, right of the toggle
+                  CGRect(x: 1450, y: 5.5, width: 22, height: 22),      // shown (Wi-Fi)
+                  CGRect(x: -1, y: 1116, width: 36, height: 24),       // not in any menu bar
+                  CGRect(x: 8, y: 1117, width: 0, height: 0)]          // zero width
+    let r = MenuBarSections.classify(frames, toggle: toggle, hidden: hidden, always: nil, screens: screens)
+    expect(r[0]?.section == .hidden && r[1]?.section == .hidden, "\(r)")
+    expect(r[2]?.section == .shown && r[3]?.section == .shown)
+    expect(r[4] == nil && r[5] == nil, "icons outside every menu bar are dropped")
+    expect(r[2]!.rd == 1728 - 1101 && r[0]!.rd > r[1]!.rd, "distances from the toggle's bar, larger = further left")
+    // An always-hidden divider further left splits the hidden icons.
+    let always = CGRect(x: -9200, y: 4.5, width: 5002, height: 24)
+    let r2 = MenuBarSections.classify([CGRect(x: -9300, y: 4.5, width: 30, height: 24), frames[1]], toggle: toggle, hidden: hidden,
+                                      always: always, screens: screens)
+    expect(r2[0]?.section == .alwaysHidden && r2[1]?.section == .hidden)
+    // Top-edge matching was the old bug: y = 4.5 is still in a 33 pt bar.
+    expect(MenuBarSections.inMenuBar(CGRect(x: 0, y: 4.5, width: 24, height: 24), of: screens[0]))
+    expect(!MenuBarSections.inMenuBar(CGRect(x: 0, y: 1116, width: 24, height: 24), of: screens[0]))
 }
 
 test("reveal model: toggle and toggleAll") {
@@ -274,9 +328,8 @@ test("rule engine") {
 }
 
 test("settings: defaults, clamping, cleared hotkeys stay cleared") {
-    let suite = "bartap.tests.\(UUID().uuidString)"
-    let d = UserDefaults(suiteName: suite)!
-    defer { d.removePersistentDomain(forName: suite) }
+    let (d, discard) = scratchDefaults()
+    defer { discard() }
     let s = Settings(defaults: d)
     expect(s.autoRehide && s.rehideDelay == 8 && !s.alwaysHiddenEnabled && s.startCollapsed)
     expect(s.hotkey(.toggle)?.display() == "⌃⌥⌘B")
@@ -286,6 +339,11 @@ test("settings: defaults, clamping, cleared hotkeys stay cleared") {
     expect(s.hoverDelay == 2)
     s.setHotkey(.toggle, nil)
     expect(s.hotkey(.toggle) == nil, "cleared hotkey must not fall back to the factory default")
+    expect(s.provisionalToggleKey == nil)
+    s.provisionalToggleKey = 884.5
+    expect(Settings(defaults: d).provisionalToggleKey == 884.5)
+    s.provisionalToggleKey = nil
+    expect(d.object(forKey: "provisionalToggleKey") == nil, "cleared, not stored as 0")
     var r = s.rules
     r.largeScreen = true
     r.bundleIDs = ["a", "b"]
@@ -389,18 +447,17 @@ test("stats: sensor classification and decoding") {
 }
 
 test("stats: settings") {
-    let suite = "bartap.tests.stats.\(UUID().uuidString)"
-    let d = UserDefaults(suiteName: suite)!
-    defer { d.removePersistentDomain(forName: suite) }
+    let (d, discard) = scratchDefaults()
+    defer { discard() }
     let s = Settings(defaults: d)
     expect(s.statsModules.isEmpty && s.statsInterval == 1 && !s.statsCombined)
     s.statsModules = [.cpu, .network]
     expect(Settings(defaults: d).statsModules == [.cpu, .network])
-    expect(s.statsMode(.cpu) == .graphPercent, "default mode")
-    s.setStatsMode(.cpu, .rates)   // not a CPU mode → ignored
-    expect(s.statsMode(.cpu) == .graphPercent)
-    s.setStatsMode(.cpu, .cores)
-    expect(s.statsMode(.cpu) == .cores)
+    expect(s.statsElements(.cpu) == [.graph, .percent], "default elements")
+    s.setStatsElements(.cpu, [.rates])   // not a CPU element → ignored
+    expect(s.statsElements(.cpu) == [.graph, .percent])
+    s.setStatsElements(.cpu, [.cores])
+    expect(s.statsElements(.cpu) == [.cores])
     s.statsInterval = 0.2
     expect(s.statsInterval == 1)
     var a = s.alerts
@@ -409,12 +466,256 @@ test("stats: settings") {
     a.cpuPercent = 500
     s.alerts = a
     expect(s.alerts.cpuEnabled && s.alerts.cpuPercent == 100, "clamped")
-    for m in StatsModule.allCases { expect(!m.modes.isEmpty) }
-    expect(s.statsMode(.memory) == .piePercent && s.statsMode(.disk) == .piePercent && s.statsMode(.battery) == .iconPercent,
-           "classic iStat layouts are the defaults")
+    for m in StatsModule.allCases {
+        expect(!m.presets.isEmpty && !m.elements.isEmpty)
+        for p in m.presets { expect(m.sanitized(p) == p, "\(m) preset uses only its own elements, once: \(p)") }
+    }
+    expect(s.statsElements(.memory) == [.pie, .percent] && s.statsElements(.disk) == [.pie, .percent]
+           && s.statsElements(.battery) == [.battery, .percent], "classic iStat layouts are the defaults")
     expect(s.clockFormat == "EEE HH:mm")
     s.worldClocks = ["Asia/Tokyo", "Not/AZone", "Europe/London"]
     expect(s.worldClocks == ["Asia/Tokyo", "Europe/London"], "invalid time zones are dropped")
+}
+
+test("stats: element lists, presets, migration and module order") {
+    let (d, discard) = scratchDefaults()
+    defer { discard() }
+    let s = Settings(defaults: d)
+    // The memory and disk layouts people asked for exist as presets.
+    expect(StatsModule.memory.presets.contains([.usedFree]) && StatsModule.memory.presets.contains([.pie, .usedFree]))
+    expect(StatsModule.disk.presets.contains([.readWrite]) && StatsModule.disk.presets.contains([.pie, .readWrite]))
+    expect(StatsModule.network.presets.contains([.graph, .rates]))
+    // Custom combinations keep their order; unknown, foreign and repeated elements are dropped.
+    s.setStatsElements(.memory, [.usedFree, .pie, .usedFree, .rates, .label])
+    expect(s.statsElements(.memory) == [.usedFree, .pie, .label])
+    s.setStatsElements(.memory, [])
+    expect(s.statsElements(.memory) == [.usedFree, .pie, .label], "an empty list is ignored")
+    d.set(["bogus", "percent"], forKey: "stats.elements.gpu")
+    expect(s.statsElements(.gpu) == [.percent])
+    // BarTap 1.0 stored one mode per module.
+    d.set("usedAmount", forKey: "stats.mode.disk")
+    expect(s.statsElements(.disk) == [.used])
+    d.set("activity", forKey: "stats.mode.disk")
+    expect(s.statsElements(.disk) == [.readWrite])
+    d.set("iconPercent", forKey: "stats.mode.battery")
+    expect(s.statsElements(.battery) == [.battery, .percent])
+    d.set("rates", forKey: "stats.mode.cpu")
+    expect(s.statsElements(.cpu) == [.graph, .percent], "a foreign legacy mode falls back to the default")
+    s.setStatsElements(.disk, [.pie, .readWrite])
+    expect(s.statsElements(.disk) == [.pie, .readWrite], "the element list wins over the legacy mode")
+    // Module order is the user's, without repeats.
+    s.statsModules = [.network, .memory, .cpu, .network]
+    expect(s.statsModules == [.network, .memory, .cpu])
+    for raw in ["graphPercent", "graph", "percent", "cores", "pie", "piePercent", "usedAmount", "freeAmount", "activity", "rates",
+                "cpuTemperature", "temperatureAndFan", "power", "iconPercent", "timeRemaining", "clock"] {
+        expect(StatsElement.fromLegacyMode(raw) != nil, "legacy mode \(raw) maps")
+    }
+}
+
+test("stats: compact amounts for U:/F:") {
+    let gb: UInt64 = 1_073_741_824
+    expect(StatFormat.compactAmount(512 * 1_048_576) == "512M")
+    expect(StatFormat.compactAmount(12 * gb + gb / 3) == "12.3G")
+    expect(StatFormat.compactAmount(412 * gb) == "412G")
+    expect(StatFormat.compactAmount(1843 * gb) == "1.8T")
+}
+
+test("ai: Claude Code lines") {
+    let line = #"{"parentUuid":"a","isSidechain":false,"type":"assistant","timestamp":"2026-11-01T10:15:30.123Z","requestId":"req_1","sessionId":"s","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi \"model\":\"fake\""}],"usage":{"input_tokens":2,"cache_creation_input_tokens":14672,"cache_read_input_tokens":25978,"output_tokens":1330,"output_tokens_details":{"thinking_tokens":1166},"cache_creation":{"ephemeral_1h_input_tokens":4000,"ephemeral_5m_input_tokens":10672}}}}"#
+    guard let e = ClaudeCodeLog.entry(from: Data(line.utf8)) else { expect(false, "parsed"); return }
+    expect(e.agent == .claudeCode && e.model == "claude-opus-5-5" && e.dedupeKey == "msg_1|req_1")
+    expect(e.tokens == TokenCounts(input: 2, output: 1330, cacheRead: 25978, cacheWrite: 10672, cacheWrite1h: 4000, reasoning: 1166), "\(e.tokens)")
+    expect(e.tokens.total == 2 + 1330 + 25978 + 14672 && !e.longContext)
+    expect(abs(e.date.timeIntervalSince1970 - 1793528130.123) < 0.01, "timestamp with fractions")
+    let user = #"{"type":"user","timestamp":"2026-11-01T10:15:30Z","message":{"role":"user","content":"usage"}}"#
+    expect(ClaudeCodeLog.entry(from: Data(user.utf8)) == nil, "user lines carry no usage")
+    let synthetic = line.replacingOccurrences(of: "claude-opus-5-5", with: "<synthetic>")
+    expect(ClaudeCodeLog.entry(from: Data(synthetic.utf8)) == nil, "synthetic placeholders are skipped")
+    let long = line.replacingOccurrences(of: #""cache_read_input_tokens":25978"#, with: #""cache_read_input_tokens":250000"#)
+    expect(ClaudeCodeLog.entry(from: Data(long.utf8))?.longContext == true, "prompt over 200k")
+    expect(ClaudeCodeLog.entry(from: Data("not json".utf8)) == nil)
+}
+
+test("ai: Codex session totals become per-turn usage; rate limits") {
+    var r = CodexLogReader()
+    func event(_ input: Int, _ cached: Int, _ output: Int, _ reasoning: Int, at ts: String, limits: String = "null") -> Data {
+        Data(#"{"timestamp":"\#(ts)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":\#(input),"cached_input_tokens":\#(cached),"cache_write_input_tokens":0,"output_tokens":\#(output),"reasoning_output_tokens":\#(reasoning),"total_tokens":\#(input + output)},"last_token_usage":{}},"rate_limits":\#(limits)}}"#.utf8)
+    }
+    expect(r.read(Data(#"{"timestamp":"2026-11-01T09:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5-codex","effort":"high"}}"#.utf8)).isEmpty)
+    let first = r.read(event(28071, 0, 319, 0, at: "2026-11-01T09:00:05Z"))
+    guard case .usage(let a)? = first.first else { expect(false, "first turn"); return }
+    expect(a.model == "gpt-5.5-codex" && a.tokens == TokenCounts(input: 28071, output: 319), "\(a.tokens)")
+    let limits = #"{"limit_id":"codex","primary":{"used_percent":6.0,"window_minutes":10080,"resets_at":1793811197},"secondary":{"used_percent":41.5,"window_minutes":300,"resets_at":1793532000},"credits":{"has_credits":true,"unlimited":false,"balance":"12.5"},"plan_type":"plus"}"#
+    let second = r.read(event(60000, 20000, 900, 200, at: "2026-11-01T09:01:00Z", limits: limits))
+    guard case .usage(let b)? = second.first else { expect(false, "second turn"); return }
+    expect(b.tokens == TokenCounts(input: 60000 - 28071 - 20000, output: 581, cacheRead: 20000, reasoning: 200), "delta: \(b.tokens)")
+    guard case .limits(let l)? = second.last else { expect(false, "limits"); return }
+    expect(l.plan == "plus" && l.credits == 12.5 && l.windows.count == 2)
+    expect(l.windows[0].minutes == 10080 && l.windows[0].shortName == "7d" && l.windows[1].shortName == "5h")
+    expect(l.tightest(now: Date(timeIntervalSince1970: 1793500000))?.usedPercent == 41.5, "the fuller window")
+    expect(l.tightest(now: Date(timeIntervalSince1970: 1793600000))?.usedPercent == 6.0, "a window that already reset is ignored")
+    expect(r.read(event(60000, 20000, 900, 200, at: "2026-11-01T09:02:00Z")).isEmpty, "an unchanged total adds nothing")
+    let restart = r.read(event(500, 0, 10, 0, at: "2026-11-01T09:03:00Z"))
+    guard case .usage(let c)? = restart.first else { expect(false, "restart"); return }
+    expect(c.tokens == TokenCounts(input: 500, output: 10), "a smaller total starts a new count")
+}
+
+test("ai: OpenCode messages") {
+    let data = Data(#"{"role":"assistant","cost":0.0123,"tokens":{"input":1200,"output":300,"reasoning":50,"cache":{"read":800,"write":100}},"modelID":"claude-sonnet-5","providerID":"anthropic","time":{"created":1793528130000,"completed":1793528131000}}"#.utf8)
+    guard let e = OpenCodeLog.entry(fromMessageData: data) else { expect(false, "parsed"); return }
+    expect(e.agent == .openCode && e.model == "claude-sonnet-5" && e.recordedCost == 0.0123)
+    expect(e.tokens == TokenCounts(input: 1200, output: 350, cacheRead: 800, cacheWrite: 100, reasoning: 50))
+    let free = Data(#"{"role":"assistant","cost":0,"tokens":{"input":10,"output":1,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"x","time":{"created":1}}"#.utf8)
+    expect(OpenCodeLog.entry(fromMessageData: free)?.recordedCost == nil, "zero cost is computed from prices instead")
+    expect(OpenCodeLog.entry(fromMessageData: Data(#"{"role":"user","time":{"created":1}}"#.utf8)) == nil)
+}
+
+test("ai: ranges, book totals, prices") {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "America/Chicago")!
+    cal.firstWeekday = 2   // Monday
+    let now = cal.date(from: DateComponents(year: 2026, month: 11, day: 4, hour: 15))!   // a Wednesday
+    func key(_ r: AIRange) -> String { AIUsageBook.dayKey(r.start(containing: now, calendar: cal), calendar: cal) }
+    expect(key(.today) == "2026-11-04" && key(.week) == "2026-11-02" && key(.month) == "2026-11-01")
+    expect(key(.quarter) == "2026-10-01" && key(.year) == "2026-01-01")
+
+    let p = ModelPrice(input: 5e-6, output: 25e-6, cacheRead: 0.5e-6, cacheWrite: 6.25e-6, inputLong: 10e-6, outputLong: 37.5e-6)
+    let table = ["claude-opus-5-5": p, "gpt-5.5-codex": ModelPrice(input: 1.25e-6, output: 10e-6, cacheRead: 0.125e-6, cacheWrite: 0)]
+    let prices: (String) -> ModelPrice? = { AIPricing.lookup($0, in: table) }
+    expect(AIPricing.lookup("anthropic/claude-opus-5-5", in: table) == p, "provider prefix")
+    expect(AIPricing.lookup("claude-opus-5-5-20261015", in: table) == p, "date suffix")
+    expect(AIPricing.lookup("gpt-5.5-codex-latest", in: table) != nil, "suffixed variant")
+    expect(AIPricing.lookup("mystery-model", in: table) == nil)
+    let t = TokenCounts(input: 1_000_000, output: 100_000, cacheRead: 2_000_000, cacheWrite: 400_000, cacheWrite1h: 100_000)
+    expect(abs(AIPricing.cost(t, p, long: false) - (5 + 2.5 + 1 + 2.5 + 1)) < 1e-9, "1h writes default to 2x input")
+    expect(abs(AIPricing.cost(TokenCounts(input: 1_000_000), p, long: true) - 10) < 1e-9, "long-context tier")
+
+    var book = AIUsageBook()
+    let day = { (d: Int) in cal.date(from: DateComponents(year: 2026, month: 11, day: d, hour: 12))! }
+    book.add(AIUsageEntry(agent: .claudeCode, model: "claude-opus-5-5", date: day(4), tokens: TokenCounts(input: 1_000_000)), calendar: cal)
+    book.add(AIUsageEntry(agent: .claudeCode, model: "claude-opus-5-5", date: day(1), tokens: TokenCounts(output: 1_000_000)), calendar: cal)
+    book.add(AIUsageEntry(agent: .codex, model: "gpt-5.5-codex", date: day(3), tokens: TokenCounts(input: 2_000_000)), calendar: cal)
+    book.add(AIUsageEntry(agent: .openCode, model: "mystery-model", date: day(4), tokens: TokenCounts(input: 7), recordedCost: 0.5), calendar: cal)
+    book.add(AIUsageEntry(agent: .openCode, model: "mystery-model", date: day(4), tokens: TokenCounts(input: 3)), calendar: cal)
+    let all = Set(AIAgent.allCases)
+    let today = book.total(from: key(.today), agents: all, prices: prices)
+    expect(today.tokens.total == 1_000_010 && abs(today.cost - 5.5) < 1e-9 && today.unpricedTokens == 0, "recorded cost wins for its key: \(today)")
+    let week = book.total(from: key(.week), agents: [.claudeCode, .codex], prices: prices)
+    expect(week.tokens.total == 3_000_000 && abs(week.cost - 7.5) < 1e-9, "\(week)")
+    let month = book.total(from: key(.month), agents: [.claudeCode], prices: prices)
+    expect(month.tokens.total == 2_000_000 && abs(month.cost - 30) < 1e-9)
+    var unknown = AIUsageBook()
+    unknown.add(AIUsageEntry(agent: .geminiCLI, model: "mystery-model", date: day(4), tokens: TokenCounts(input: 9)), calendar: cal)
+    expect(unknown.total(from: "2026-01-01", agents: all, prices: prices).unpricedTokens == 9, "unpriced tokens are reported, not guessed")
+    expect(book.daily(last: 4, now: now, calendar: cal, agents: all, prices: prices).map { $0.tokens.total } == [1_000_000, 0, 2_000_000, 1_000_010])
+    expect(book.models(from: key(.month), agents: all, prices: prices).first?.model == "claude-opus-5-5", "most expensive first")
+    var replaced = book
+    replaced.replace(.openCode, with: [AIUsageEntry(agent: .openCode, model: "m", date: day(2), tokens: TokenCounts(output: 1))], calendar: cal)
+    expect(replaced.total(from: key(.today), agents: [.openCode], prices: prices).tokens.total == 0)
+    expect(replaced.total(from: key(.month), agents: [.openCode], prices: prices).tokens.total == 1)
+    book.prune(before: "2026-11-02")
+    expect(book.days.keys.sorted() == ["2026-11-03", "2026-11-04"] && book.recordedCosts.keys.sorted() == ["2026-11-04"])
+}
+
+test("ai: prompt tiers, fast mode, model thresholds") {
+    expect(AIUsageEntry.tier(99_000) == 0 && AIUsageEntry.tier(150_000) == 100 && AIUsageEntry.tier(250_000) == 200 && AIUsageEntry.tier(300_000) == 272)
+    let e = AIUsageEntry(agent: .claudeCode, model: "claude-haiku-5-5", date: Date(), tokens: TokenCounts(input: 1), promptTokens: 150_000, fast: true)
+    expect(AIUsageBook.key(e) == "claudeCode|claude-haiku-5-5|t100|fast")
+    let k = AIUsageBook.parse(key: AIUsageBook.key(e))
+    expect(k?.tier == 100 && k?.fast == true && k?.model == "claude-haiku-5-5")
+    expect(AIUsageBook.parse(key: "claudeCode|m|long")?.tier == 200, "keys saved by earlier builds still read")
+    let haiku = ModelPrice(input: 1e-6, output: 5e-6, cacheRead: 1e-7, cacheWrite: 1.25e-6, inputLong: 2e-6, outputLong: 7.5e-6, threshold: 100_000)
+    let t = TokenCounts(input: 1_000_000)
+    expect(abs(AIPricing.cost(t, haiku, tier: 100) - 2) < 1e-9, "Haiku 5.5 bills the whole request higher above 100k")
+    expect(abs(AIPricing.cost(t, haiku, tier: 0) - 1) < 1e-9)
+    let gpt = ModelPrice(input: 1e-6, output: 1e-5, cacheRead: 1e-7, cacheWrite: 1e-6, inputLong: 2e-6, threshold: 272_000)
+    expect(abs(AIPricing.cost(t, gpt, tier: 200) - 1) < 1e-9 && abs(AIPricing.cost(t, gpt, tier: 272) - 2) < 1e-9, "GPT tier starts at 272k")
+    expect(abs(AIPricing.cost(t, haiku, tier: 0, fast: true) - 2) < 1e-9, "fast mode defaults to 2x")
+    var fastPrice = haiku; fastPrice.fast = 6
+    expect(abs(AIPricing.cost(t, fastPrice, tier: 0, fast: true) - 6) < 1e-9)
+}
+
+test("ai: Codex forks and limit ids") {
+    var r = CodexLogReader()
+    _ = r.read(Data(#"{"timestamp":"2026-11-01T10:00:00Z","type":"session_meta","payload":{"id":"child","forked_from_id":"parent","timestamp":"2026-11-01T10:00:00Z","base_instructions":{"text":"long"}}}"#.utf8))
+    expect(r.forkedAt != nil, "fork marker read")
+    let replay = Data(#"{"timestamp":"2026-11-01T09:59:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900000,"cached_input_tokens":0,"output_tokens":5000,"reasoning_output_tokens":0,"total_tokens":905000}},"rate_limits":null}}"#.utf8)
+    expect(r.read(replay).isEmpty, "usage stamped before the fork belongs to the parent")
+    let own = Data(#"{"timestamp":"2026-11-01T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":905000,"cached_input_tokens":0,"output_tokens":5100,"reasoning_output_tokens":0,"total_tokens":910100}},"rate_limits":{"limit_id":"other","primary":{"used_percent":99,"window_minutes":300,"resets_at":1893456000}}}}"#.utf8)
+    let events = r.read(own)
+    guard case .usage(let u)? = events.first else { expect(false, "own usage"); return }
+    expect(u.tokens == TokenCounts(input: 5000, output: 100), "only the fork's own turn: \(u.tokens)")
+    expect(events.count == 1, "limits of another limit id are ignored")
+}
+
+test("ai: Claude Code's cached plan usage") {
+    let json = Data(#"{"numStartups":3,"projects":{"/x":{"history":[]}},"cachedUsageUtilization":{"fetchedAtMs":1793528130000,"accountUuid":"a","utilization":{"five_hour":{"utilization":43,"resets_at":"2026-11-01T15:00:00Z","remaining_dollars":null},"seven_day":{"utilization":61.5,"resets_at":null},"seven_day_opus":null,"tangelo":null},"limits":[{"kind":"weekly_scoped","percent":38,"scope":{"model":{"display_name":"Fable"}}}]},"other":1}"#.utf8)
+    guard let st = ClaudePlanCache.status(fromClaudeJSON: json) else { expect(false, "parsed"); return }
+    expect(st.agent == .claudeCode && st.windows.count == 3, "\(st.windows)")
+    expect(st.windows[0].minutes == 300 && st.windows[0].usedPercent == 43 && st.windows[0].resetsAt != nil)
+    expect(st.windows[1].minutes == 10_080 && st.windows[1].usedPercent == 61.5 && st.windows[1].resetsAt == nil)
+    expect(st.windows[2].scope == "Fable" && st.windows[2].usedPercent == 38)
+    expect(abs(st.updated.timeIntervalSince1970 - 1793528130) < 1)
+    expect(ClaudePlanCache.status(fromClaudeJSON: Data(#"{"numStartups":3}"#.utf8)) == nil)
+    let pretty = Data("{\n  \"cachedUsageUtilization\": {\n    \"fetchedAtMs\": 1793528130000,\n    \"utilization\": {\n      \"five_hour\": { \"utilization\": 12, \"resets_at\": null }\n    }\n  }\n}".utf8)
+    expect(ClaudePlanCache.status(fromClaudeJSON: pretty)?.windows.first?.usedPercent == 12, "pretty-printed, as Claude Code writes it")
+}
+
+test("ai: plan limits as used or left") {
+    let w = AIPlanWindow(minutes: 300, usedPercent: 43, resetsAt: nil)
+    expect(w.percent(left: false) == 43 && w.percent(left: true) == 57)
+    expect(AIPlanWindow(minutes: 300, usedPercent: 104, resetsAt: nil).percent(left: true) == 0, "over the limit: nothing left")
+    let (d, discard) = scratchDefaults()
+    defer { discard() }
+    let s = Settings(defaults: d)
+    expect(!s.aiPlanLeft, "shows what's used by default")
+    s.aiPlanLeft = true
+    expect(Settings(defaults: d).aiPlanLeft)
+}
+
+test("ai: price tables") {
+    let litellm = Data(#"""
+    {"sample_spec":{"mode":"chat"},
+     "claude-haiku-5-5":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":1e-6,"output_cost_per_token":5e-6,"cache_read_input_token_cost":1e-7,"cache_creation_input_token_cost":1.25e-6,"cache_creation_input_token_cost_above_1hr":2e-6,"input_cost_per_token_above_100k_tokens":2e-6,"output_cost_per_token_above_100k_tokens":1e-5,"provider_specific_entry":{"fast":2.0,"us":1.1}},
+     "gemini/gemini-2.5-pro":{"litellm_provider":"gemini","mode":"chat","input_cost_per_token":1.25e-6,"output_cost_per_token":1e-5,"input_cost_per_token_above_200k_tokens":2.5e-6},
+     "bedrock/anthropic.claude":{"litellm_provider":"bedrock","mode":"chat","input_cost_per_token":1,"output_cost_per_token":1},
+     "text-embedding-3":{"litellm_provider":"openai","mode":"embedding","input_cost_per_token":1e-8,"output_cost_per_token":0},
+     "gpt-5.5":{"litellm_provider":"openai","mode":"chat","input_cost_per_token":5e-6,"output_cost_per_token":3e-5,"cache_read_input_token_cost":5e-7,"input_cost_per_token_above_272k_tokens":1e-5}}
+    """#.utf8)
+    guard let compact = AIPriceTable.compact(fromLiteLLM: litellm, fetched: "2026-11-01"), let table = AIPriceTable.decode(compact) else {
+        expect(false, "converted"); return
+    }
+    expect(table.fetched == "2026-11-01" && Set(table.models.keys) == ["claude-haiku-5-5", "gemini-2.5-pro", "gpt-5.5"], "\(table.models.keys)")
+    let h = table.models["claude-haiku-5-5"]!
+    expect(h.threshold == 100_000 && h.inputLong == 2e-6 && h.cacheWrite1h == 2e-6 && h.fast == 2)
+    expect(table.models["gemini-2.5-pro"]?.threshold == 200_000 && table.models["gpt-5.5"]?.threshold == 272_000)
+    expect(table.models["gpt-5.5"]?.cacheWrite == 5e-6, "no cache-write price: input rate")
+    expect(table.models["gemini-2.5-pro"]?.cacheRead == 1.25e-6, "no cache-read price: input rate")
+}
+
+test("ai: Gemini, Qwen and Kimi logs") {
+    let gemini = Data(#"{"id":"msg-1","timestamp":"2026-05-01T00:01:00.000Z","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":14918,"output":60,"cached":4000,"thoughts":863,"tool":7,"total":15848}}"#.utf8)
+    guard let g = GeminiLog.entries(from: gemini).first else { expect(false, "gemini"); return }
+    expect(g.agent == .geminiCLI && g.dedupeKey == "gemini|msg-1" && g.model == "gemini-3.1-pro-preview")
+    expect(g.tokens == TokenCounts(input: 14918 - 4000 + 7, output: 60 + 863, cacheRead: 4000, reasoning: 863), "\(g.tokens)")
+    expect(GeminiLog.entries(from: Data(#"{"id":"u1","type":"user","timestamp":"2026-05-01T00:00:00Z","content":"hi"}"#.utf8)).isEmpty)
+    let session = Data(#"{"sessionId":"s","messages":[{"id":"a","type":"user","timestamp":"2026-05-01T00:00:00Z"},{"id":"b","type":"gemini","timestamp":"2026-05-01T00:00:05Z","model":"gemini-2.5-pro","tokens":{"input":10,"output":2,"cached":0,"thoughts":0,"tool":0,"total":12}}]}"#.utf8)
+    expect(GeminiLog.entries(from: session).count == 1, "older whole-session files")
+    let qwen = Data(#"{"type":"assistant","model":"qwen3.5-plus","timestamp":"2026-02-23T14:24:56.857Z","sessionId":"d96bf338","uuid":"q1","usageMetadata":{"promptTokenCount":12414,"candidatesTokenCount":76,"thoughtsTokenCount":39,"cachedContentTokenCount":2000,"totalTokenCount":12529}}"#.utf8)
+    guard let q = QwenLog.entry(from: qwen) else { expect(false, "qwen"); return }
+    expect(q.tokens == TokenCounts(input: 10414, output: 115, cacheRead: 2000, reasoning: 39), "\(q.tokens)")
+    let qwenInside = Data(#"{"type":"assistant","model":"m","timestamp":"2026-02-23T14:24:56Z","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50,"thoughtsTokenCount":20,"cachedContentTokenCount":0,"totalTokenCount":150}}"#.utf8)
+    expect(QwenLog.entry(from: qwenInside)?.tokens.output == 50, "thoughts already inside candidates are not added twice")
+    let kimi = Data(#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":5102,"output":172,"inputCacheRead":13312,"inputCacheCreation":0},"usageScope":"turn","time":1780319377014}"#.utf8)
+    guard let k = KimiLog.entry(from: kimi) else { expect(false, "kimi"); return }
+    expect(k.model == "kimi-for-coding" && k.tokens == TokenCounts(input: 5102, output: 172, cacheRead: 13312))
+    expect(abs(k.date.timeIntervalSince1970 - 1780319377.014) < 0.001)
+}
+
+test("ai: formatting") {
+    expect(AIFormat.tokens(845) == "845" && AIFormat.tokens(1234) == "1.2K" && AIFormat.tokens(45_600) == "46K")
+    expect(AIFormat.tokens(4_560_000) == "4.6M" && AIFormat.tokens(123_000_000) == "123M" && AIFormat.tokens(2_500_000_000) == "2.5B")
+    expect(AIFormat.cost(0.4) == "$0.40" && AIFormat.cost(12.345) == "$12.35" && AIFormat.cost(234.4) == "$234" && AIFormat.cost(1234) == "$1.2K")
 }
 
 test("stats: data usage rolls over by day and month") {

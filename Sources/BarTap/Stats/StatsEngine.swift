@@ -57,6 +57,10 @@ struct StatsSnapshot {
     var battery: BatteryInfo?
     var topCPU: [ProcessUsage] = []
     var topMemory: [ProcessUsage] = []
+    /// AI usage for the menu bar (computed when usage changes, not every second).
+    var ai: AIDisplay?
+    /// The AI reader's sums and plan limits, for the dropdown.
+    var aiDetail: AIUsageEngine.Snapshot?
 }
 
 /// Samples system metrics on a private utility queue with one coalesced timer. Only what is

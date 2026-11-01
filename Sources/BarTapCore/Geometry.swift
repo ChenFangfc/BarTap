@@ -104,6 +104,38 @@ public enum MenuBarGeometry {
     }
 }
 
+public enum ExtraSection: Equatable { case shown, hidden, alwaysHidden }
+
+/// Sorting other apps' menu bar icons into BarTap's sections, from Accessibility frames.
+public enum MenuBarSections {
+    /// Whether a frame sits in a display's menu bar. macOS 26 reports extras a few points into the
+    /// bar (y ≈ 3…6 on a 33 pt bar), so test the frame's vertical middle, not its top edge.
+    public static func inMenuBar(_ f: CGRect, of s: ScreenInfo) -> Bool {
+        f.midY >= s.frame.minY - 2 && f.midY <= s.frame.minY + s.menuBarHeight + 2
+    }
+
+    /// For each frame, its distance from the right edge of the bar that holds our toggle and its
+    /// section; nil for icons in no menu bar (macOS 26 parks icons it doesn't show at the bottom of
+    /// the screen) and for zero-width ones. macOS reports every app's extras on one display, hidden
+    /// ones far off its left edge, so one reference bar measures them all.
+    public static func classify(_ frames: [CGRect], toggle: CGRect, hidden: CGRect, always: CGRect?,
+                                screens: [ScreenInfo]) -> [(rd: CGFloat, section: ExtraSection)?] {
+        guard let ref = screens.first(where: { inMenuBar(toggle, of: $0) && $0.frame.minX <= toggle.midX && toggle.midX <= $0.frame.maxX })
+        else { return frames.map { _ in nil } }
+        func rd(_ f: CGRect) -> CGFloat? { f.width > 0 && inMenuBar(f, of: ref) ? ref.frame.maxX - f.maxX : nil }
+        guard let hiddenRD = rd(hidden) else { return frames.map { _ in nil } }
+        // Dividers grow leftwards from a fixed right edge, so an icon is hidden when its right edge
+        // is at or beyond the divider's left edge (measured from the right).
+        let hiddenLeft = hiddenRD + hidden.width
+        let alwaysLeft = always.flatMap { a in rd(a).map { $0 + a.width } }
+        return frames.map { f in
+            guard let d = rd(f) else { return nil }
+            if let a = alwaysLeft, d >= a - 1 { return (d, .alwaysHidden) }
+            return (d, d >= hiddenLeft - 1 ? .hidden : .shown)
+        }
+    }
+}
+
 /// Positions of our own three status items, from their in-process proxy windows, expressed in the
 /// main display's Cocoa x coordinates. `nil` means the item does not exist (feature disabled).
 public struct OwnItemFrames: Equatable {
@@ -112,6 +144,22 @@ public struct OwnItemFrames: Equatable {
     public var alwaysHidden: CGRect?
 
     public init(toggle: CGRect, hidden: CGRect, alwaysHidden: CGRect?) {
+        self.toggle = toggle
+        self.hidden = hidden
+        self.alwaysHidden = alwaysHidden
+    }
+}
+
+/// Our items' stored order keys ("NSStatusItem Preferred Position"): a larger value is further
+/// left. macOS orders the real items by these keys. The in-process proxy frames can fall out of
+/// sync with that order (seen on macOS 26 with three displays: after a relaunch the proxies showed
+/// the toggle and the divider swapped for minutes while the bar itself was correct).
+public struct OwnItemKeys: Equatable {
+    public var toggle: Double
+    public var hidden: Double
+    public var alwaysHidden: Double?
+
+    public init(toggle: Double, hidden: Double, alwaysHidden: Double?) {
         self.toggle = toggle
         self.hidden = hidden
         self.alwaysHidden = alwaysHidden
@@ -138,6 +186,17 @@ public enum LayoutValidator {
             // This holds whether `hidden` is collapsed or not, because both grow leftwards.
             if a.maxX > f.hidden.minX + tol { return .alwaysRightOfHidden }
         }
+        return nil
+    }
+
+    /// Readiness from the frames, order from the stored keys when we have them (macOS lays the
+    /// bar out by those keys; the proxies only mirror it, and not always in time).
+    public static func check(_ f: OwnItemFrames, keys: OwnItemKeys?) -> LayoutProblem? {
+        if f.toggle.width <= 0 || f.hidden.width <= 0 || f.toggle == .zero || f.hidden == .zero { return .notReady }
+        if let a = f.alwaysHidden, a.width <= 0 { return .notReady }
+        guard let k = keys else { return check(f) }
+        if k.hidden <= k.toggle { return .hiddenRightOfToggle }
+        if let a = k.alwaysHidden, a <= k.hidden { return .alwaysRightOfHidden }
         return nil
     }
 }

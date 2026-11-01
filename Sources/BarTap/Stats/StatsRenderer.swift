@@ -1,37 +1,48 @@
 import AppKit
 import BarTapCore
 
-/// Draws stats into menu bar images in the classic iStat Menus layouts: a history bar graph with
-/// a percentage for CPU/GPU, a pie with a percentage for memory and disk, two lines with fixed
-/// arrows for network, a battery glyph with a percentage, and plain values for sensors and time.
+/// Draws stats into menu bar images. An item is a row of elements (graph, pie, percentage,
+/// two-line values…) in the order the user chose, like iStat Menus' menubar items.
 ///
-/// Every element has a FIXED position and every item a FIXED width; only right-aligned numbers
-/// change. Nothing to the left of a changing number moves (no jumping arrows), and the item never
-/// resizes (no shifting of the icons beside it). Images are monochrome templates, so they follow
-/// the menu bar's light/dark/tinted appearance on every display.
+/// Every element has a FIXED width that never depends on the values, and inside it every label,
+/// arrow and graph has a FIXED position; only right-aligned numbers change. Nothing to the left of a
+/// changing number moves (no jumping arrows), and the item never resizes (no shifting of the icons
+/// beside it). Images are monochrome templates, so they follow the menu bar's light/dark/tinted
+/// appearance on every display.
 enum StatsRenderer {
     static let height: CGFloat = 22
     private static let lineFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
     private static let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-    private static let tinyFont = NSFont.systemFont(ofSize: 7.5, weight: .bold)
+    private static let labelFont = NSFont.systemFont(ofSize: 9, weight: .bold)
 
     struct Options {
         var fahrenheit = false
         var bits = false
         var clockFormat = "EEE HH:mm"
+        /// AI item: one segment per tag (agent) instead of the total.
+        var aiTags: [String] = []
+        /// AI item: plan limits as what is left.
+        var aiPlanLeft = false
     }
 
     // MARK: Fixed geometry
 
     static let graphBars = 10
     static let graphWidth = CGFloat(graphBars) * 3 - 1          // 2 pt bars, 1 pt gaps
+    static let areaWidth: CGFloat = 28                          // two-series graph (network, disk)
     static let pieSize: CGFloat = 13
+    static let meterWidth: CGFloat = 5
     static let arrowWidth: CGFloat = 6
     static let batteryWidth: CGFloat = 21
+    /// Space between two elements, and at each end of an item.
+    static let gap: CGFloat = 4
+    static let inset: CGFloat = 1
 
     private static func textWidth(_ s: String, _ f: NSFont) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: f]).width) }
     private static var percentBox: CGFloat { textWidth("100%", valueFont) }
     private static func rateBox(_ o: Options) -> CGFloat { textWidth(o.bits ? "888 Kb/s" : "888 KB/s", lineFont) }
+    private static var amountBox: CGFloat { textWidth("888.8G", lineFont) }
+    private static var shortLabelWidth: CGFloat { max(textWidth("U:", lineFont), textWidth("F:", lineFont)) }
 
     private static var clockWidthCache: [String: CGFloat] = [:]
 
@@ -60,35 +71,75 @@ enum StatsRenderer {
         return w
     }
 
-    static func width(_ module: StatsModule, _ mode: StatsMode, _ o: Options) -> CGFloat {
-        switch mode {
-        case .graphPercent: return 1 + graphWidth + 4 + percentBox + 1
-        case .graph: return module == .network ? 30 : graphWidth + 2
-        case .percent: return percentBox + 2
+    /// Short module name for the label element.
+    static func label(_ m: StatsModule) -> String {
+        switch m {
+        case .cpu: return "CPU"
+        case .gpu: return "GPU"
+        case .memory: return L("MEM")
+        case .disk: return L("DISK")
+        case .network: return L("NET")
+        case .sensors: return L("TEMP")
+        case .battery: return L("BAT")
+        case .time: return ""
+        case .ai: return "AI"
+        }
+    }
+
+    static func elementWidth(_ e: StatsElement, _ m: StatsModule, _ o: Options) -> CGFloat {
+        switch e {
+        case .label: return textWidth(label(m), labelFont)
+        case .graph: return m == .network || m == .disk ? areaWidth : graphWidth
+        case .bar: return meterWidth
+        case .pie, .ring: return pieSize
+        case .percent: return percentBox
         case .cores:
             let l = CPUReader.coreLayout()
-            return CGFloat(max(1, l.performance + l.efficiency)) * 3 + 1
-        case .pie: return pieSize + 2
-        case .piePercent: return 1 + pieSize + 4 + percentBox + 1
-        case .usedAmount, .freeAmount: return textWidth("888.8 GB", valueFont) + 2
-        case .activity: return 1 + textWidth("W", lineFont) + 3 + rateBox(o) + 1
-        case .rates: return 1 + arrowWidth + 3 + rateBox(o) + 1
-        case .cpuTemperature: return textWidth("188°", valueFont) + 2
-        case .temperatureAndFan: return max(textWidth("188°", lineFont), textWidth("8888 rpm", lineFont)) + 2
-        case .power: return textWidth("188.8 W", valueFont) + 2
-        case .iconPercent: return 1 + batteryWidth + 4 + percentBox + 1
-        case .timeRemaining: return textWidth("88:88", valueFont) + 2
+            return CGFloat(max(1, l.performance + l.efficiency)) * 3 - 1
+        case .usedFree: return shortLabelWidth + 2 + amountBox
+        case .used, .free: return textWidth("888.8 GB", valueFont)
+        case .readWrite: return textWidth("W", lineFont) + 3 + rateBox(o)
+        case .rates: return arrowWidth + 3 + rateBox(o)
+        case .temperature: return textWidth("188°", valueFont)
+        case .fan: return textWidth("8888 rpm", valueFont)
+        case .tempFan: return max(textWidth("188°", lineFont), textWidth("8888 rpm", lineFont))
+        case .power: return textWidth("188.8 W", valueFont)
+        case .battery: return batteryWidth
+        case .timeLeft: return textWidth("88:88", valueFont)
         case .clock: return clockWidth(o.clockFormat)
+        case .aiTokens: return textWidth("888.8M", valueFont)
+        case .aiCost: return textWidth("$88.88", valueFont)
+        case .aiTokensCost: return max(textWidth("888.8M", lineFont), textWidth("$88.88", lineFont))
+        case .aiPlan: return pieSize
+        case .aiPlanPercent: return percentBox
+        case .aiPlanTwo: return planLabelWidth + 3 + textWidth("100%", lineFont)
         }
+    }
+
+    private static var planLabelWidth: CGFloat { textWidth("88d", lineFont) }
+    private static var tagWidth: CGFloat { ["CC", "CX", "GM", "OC"].map { textWidth($0, tagFont) }.max() ?? 14 }
+    private static let tagFont = NSFont.systemFont(ofSize: 8.5, weight: .heavy)
+
+    private static func elementsWidth(_ m: StatsModule, _ elements: [StatsElement], _ o: Options) -> CGFloat {
+        elements.reduce(0) { $0 + elementWidth($1, m, o) } + gap * CGFloat(max(elements.count - 1, 0))
+    }
+
+    static func width(_ m: StatsModule, _ elements: [StatsElement], _ o: Options) -> CGFloat {
+        guard !elements.isEmpty else { return 2 * inset }
+        if m == .ai, !o.aiTags.isEmpty {
+            // One segment per agent: its tag, then the chosen elements.
+            let segment = tagWidth + 3 + elementsWidth(m, elements, o)
+            return 2 * inset + segment * CGFloat(o.aiTags.count) + (gap + 2) * CGFloat(o.aiTags.count - 1)
+        }
+        return 2 * inset + elementsWidth(m, elements, o)
     }
 
     // MARK: Images
 
     /// Pre-rendered 2x bitmap (cheaper for AppKit to ship to the menu bar host than a lazily
     /// drawn image).
-    static func image(_ module: StatsModule, _ mode: StatsMode, _ s: StatsSnapshot?, _ o: Options, now: Date = Date()) -> NSImage {
-        let w = width(module, mode, o)
-        return bitmap(width: w) { rect in draw(module, mode, s, o, rect, now) }
+    static func image(_ m: StatsModule, _ elements: [StatsElement], _ s: StatsSnapshot?, _ o: Options, now: Date = Date()) -> NSImage {
+        bitmap(width: width(m, elements, o)) { rect in draw(m, elements, s, o, rect, now) }
     }
 
     static func bitmap(width w: CGFloat, scale: CGFloat = 2, _ draw: (NSRect) -> Void) -> NSImage {
@@ -109,94 +160,160 @@ enum StatsRenderer {
         return img
     }
 
-    static func drawContent(_ m: StatsModule, _ mode: StatsMode, _ s: StatsSnapshot?, _ o: Options, _ r: NSRect, now: Date = Date()) {
+    static func drawContent(_ m: StatsModule, _ elements: [StatsElement], _ s: StatsSnapshot?, _ o: Options, _ r: NSRect, now: Date = Date()) {
         NSColor.black.set()
-        draw(m, mode, s, o, r, now)
+        draw(m, elements, s, o, r, now)
     }
 
     // MARK: Content
 
-    private static func draw(_ m: StatsModule, _ mode: StatsMode, _ s: StatsSnapshot?, _ o: Options, _ r: NSRect, _ now: Date) {
-        switch mode {
-        case .graphPercent:
-            bars(history(m, s), x: 1)
-            single(percentText(m, s), box: NSRect(x: 1 + graphWidth + 4, y: 0, width: percentBox, height: r.height))
+    private static func draw(_ m: StatsModule, _ elements: [StatsElement], _ s: StatsSnapshot?, _ o: Options, _ r: NSRect, _ now: Date) {
+        var x = r.minX + inset
+        if m == .ai, !o.aiTags.isEmpty {
+            for (i, tag) in o.aiTags.enumerated() {
+                single(tag, box: NSRect(x: x, y: r.minY, width: tagWidth, height: r.height), font: tagFont, align: .left)
+                x += tagWidth + 3
+                let figure = s?.ai?.perAgent.first { $0.agent.tag == tag }?.figure
+                for e in elements {
+                    let w = elementWidth(e, m, o)
+                    drawAI(e, figure, o, NSRect(x: x, y: r.minY, width: w, height: r.height))
+                    x += w + gap
+                }
+                if i < o.aiTags.count - 1 { x += 2 }
+            }
+            return
+        }
+        for e in elements {
+            let w = elementWidth(e, m, o)
+            draw(e, m, s, o, NSRect(x: x, y: r.minY, width: w, height: r.height), now)
+            x += w + gap
+        }
+    }
+
+    /// AI elements for one figure (the total, or one agent's).
+    private static func drawAI(_ e: StatsElement, _ f: AIFigure?, _ o: Options, _ r: NSRect) {
+        switch e {
+        case .label: single("AI", box: r, font: labelFont, align: .left)
+        case .aiTokens: single(f.map { AIFormat.tokens($0.tokens) } ?? "–", box: r)
+        case .aiCost: single(f.map { AIFormat.cost($0.cost) } ?? "–", box: r)
+        case .aiTokensCost:
+            twoLines(f.map { AIFormat.tokens($0.tokens) } ?? "–", f.map { AIFormat.cost($0.cost) } ?? "–", box: r)
+        case .aiPlan: ring((f?.windows.first?.percent(left: o.aiPlanLeft) ?? 0) / 100, center: NSPoint(x: r.minX + pieSize / 2, y: r.midY))
+        case .aiPlanPercent: single(f?.windows.first.map { "\(Int($0.percent(left: o.aiPlanLeft).rounded()))%" } ?? "–", box: r)
+        case .aiPlanTwo:
+            // The two windows by length (5h above 7d), labels fixed, percentages right-aligned.
+            let byLength = (f?.windows ?? []).sorted { $0.minutes < $1.minutes }.prefix(2)
+            let rows = Array(byLength) + Array(repeating: nil as AIPlanWindow?, count: 2 - byLength.count).compactMap { $0 }
+            for (i, top) in [true, false].enumerated() {
+                let w = i < rows.count ? rows[i] : nil
+                label(w?.shortName ?? "", x: r.minX, top: top)
+                text(w.map { "\(Int($0.percent(left: o.aiPlanLeft).rounded()))%" } ?? (i == 0 ? "–" : ""), lineFont,
+                     NSRect(x: r.minX + planLabelWidth + 3, y: top ? 10.5 : 0.5, width: r.width - planLabelWidth - 3, height: 11), align: .right)
+            }
+        default: break
+        }
+    }
+
+    private static func draw(_ e: StatsElement, _ m: StatsModule, _ s: StatsSnapshot?, _ o: Options, _ r: NSRect, _ now: Date) {
+        if m == .ai { drawAI(e, s?.ai?.total, o, r); return }
+        switch e {
+        case .label:
+            single(label(m), box: r, font: labelFont, align: .left)
         case .graph:
-            if m == .network {
-                let peak = max(s?.netDownHistory.suffix(14).max() ?? 0, s?.netUpHistory.suffix(14).max() ?? 0, 1024)
-                area((s?.netUpHistory ?? []).suffix(14).map { $0 / peak }, NSRect(x: 1, y: 12, width: r.width - 2, height: 8))
-                area((s?.netDownHistory ?? []).suffix(14).map { $0 / peak }, NSRect(x: 1, y: 2.5, width: r.width - 2, height: 8))
+            if let (top, bottom) = series(m, s) {
+                let peak = max(top.max() ?? 0, bottom.max() ?? 0, 1024)
+                area(top.map { $0 / peak }, NSRect(x: r.minX, y: 12, width: r.width, height: 8))
+                area(bottom.map { $0 / peak }, NSRect(x: r.minX, y: 2.5, width: r.width, height: 8))
             } else {
-                bars(history(m, s), x: 1)
+                bars(history(m, s), x: r.minX)
             }
-        case .percent:
-            single(percentText(m, s), box: NSRect(x: 1, y: 0, width: percentBox, height: r.height))
-        case .cores:
-            let cores = s?.cpu?.perCore ?? []
-            for (i, v) in cores.enumerated() {
-                let x = 1 + CGFloat(i) * 3
-                NSColor.black.withAlphaComponent(0.22).setFill()
-                NSRect(x: x, y: 3, width: 2, height: 16).fill()
-                NSColor.black.setFill()
-                NSRect(x: x, y: 3, width: 2, height: max(1, 16 * CGFloat(min(1, v)))).fill()
-            }
+        case .bar:
+            meter(fraction(m, s), x: r.minX)
         case .pie:
-            pie(fraction(m, s), center: NSPoint(x: 1 + pieSize / 2, y: r.midY))
-        case .piePercent:
-            pie(fraction(m, s), center: NSPoint(x: 1 + pieSize / 2, y: r.midY))
-            single(percentText(m, s), box: NSRect(x: 1 + pieSize + 4, y: 0, width: percentBox, height: r.height))
-        case .usedAmount:
-            single(s?.memory.map { gigs($0.used) } ?? "–", box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
-        case .freeAmount:
-            single(s.flatMap { bootVolume($0) }.map { gigs($0.free) } ?? "–", box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
-        case .activity:
+            pie(fraction(m, s), center: NSPoint(x: r.minX + pieSize / 2, y: r.midY))
+        case .ring:
+            ring(fraction(m, s), center: NSPoint(x: r.minX + pieSize / 2, y: r.midY))
+        case .percent:
+            single(percentText(m, s), box: r)
+        case .cores:
+            for (i, v) in (s?.cpu?.perCore ?? []).enumerated() {
+                let bx = r.minX + CGFloat(i) * 3
+                NSColor.black.withAlphaComponent(0.22).setFill()
+                NSRect(x: bx, y: 3, width: 2, height: 16).fill()
+                NSColor.black.setFill()
+                NSRect(x: bx, y: 3, width: 2, height: max(1, 16 * CGFloat(min(1, v)))).fill()
+            }
+        case .usedFree:
+            label("U:", x: r.minX, top: true)
+            label("F:", x: r.minX, top: false)
+            let a = amounts(m, s)
+            twoLines(a.map { StatFormat.compactAmount($0.used) } ?? "–", a.map { StatFormat.compactAmount($0.free) } ?? "–",
+                     box: NSRect(x: r.minX + shortLabelWidth + 2, y: 0, width: amountBox, height: r.height))
+        case .used:
+            single(amounts(m, s).map { gigs($0.used) } ?? "–", box: r)
+        case .free:
+            single(amounts(m, s).map { gigs($0.free) } ?? "–", box: r)
+        case .readWrite:
             let labelW = textWidth("W", lineFont)
-            label("R", x: 1, top: true)
-            label("W", x: 1, top: false)
-            twoLines(rateText(s?.diskRead, o, short: false), rateText(s?.diskWrite, o, short: false),
-                     box: NSRect(x: 1 + labelW + 3, y: 0, width: rateBox(o), height: r.height))
+            label("R", x: r.minX, top: true)
+            label("W", x: r.minX, top: false)
+            twoLines(rateText(s?.diskRead, o), rateText(s?.diskWrite, o),
+                     box: NSRect(x: r.minX + labelW + 3, y: 0, width: rateBox(o), height: r.height))
         case .rates:
-            arrow(up: true, x: 1)
-            arrow(up: false, x: 1)
-            twoLines(rateText(s?.netUp, o, short: false), rateText(s?.netDown, o, short: false),
-                     box: NSRect(x: 1 + arrowWidth + 3, y: 0, width: rateBox(o), height: r.height))
-        case .cpuTemperature:
-            single(s?.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "–",
-                   box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
-        case .temperatureAndFan:
-            let t = s?.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "–"
-            let fan = s?.sensors?.fans.first.map { "\(Int($0.rpm)) rpm" } ?? "–"
-            twoLines(t, fan, box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
+            arrow(up: true, x: r.minX)
+            arrow(up: false, x: r.minX)
+            twoLines(rateText(s?.netUp, o), rateText(s?.netDown, o),
+                     box: NSRect(x: r.minX + arrowWidth + 3, y: 0, width: rateBox(o), height: r.height))
+        case .temperature:
+            single(temperatureText(s, o), box: r)
+        case .fan:
+            single(fanText(s), box: r)
+        case .tempFan:
+            twoLines(temperatureText(s, o), fanText(s), box: r)
         case .power:
-            single(s?.sensors?.systemPower.map { String(format: "%.1f W", $0) } ?? "–",
-                   box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
-        case .iconPercent:
-            battery(s?.battery, x: 1, midY: r.midY)
-            single(s?.battery.map { "\($0.percent)%" } ?? "–", box: NSRect(x: 1 + batteryWidth + 4, y: 0, width: percentBox, height: r.height))
-        case .timeRemaining:
-            let b = s?.battery
-            let value: String
-            if let mins = b?.minutesRemaining { value = String(format: "%d:%02d", mins / 60, mins % 60) }
-            else if b?.charged == true || (b?.onAC == true && b?.charging == false) { value = "AC" }
-            else { value = "–" }
-            single(value, box: NSRect(x: 1, y: 0, width: r.width - 2, height: r.height))
+            single(s?.sensors?.systemPower.map { String(format: "%.1f W", $0) } ?? "–", box: r)
+        case .battery:
+            battery(s?.battery, x: r.minX, midY: r.midY)
+        case .timeLeft:
+            single(timeLeftText(s), box: r)
         case .clock:
-            single(clockText(o.clockFormat, now), box: NSRect(x: 0, y: 0, width: r.width, height: r.height), align: .center)
+            single(clockText(o.clockFormat, now), box: r, align: .center)
+        case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo:
+            break
         }
     }
 
     // MARK: Values
 
     static func history(_ m: StatsModule, _ s: StatsSnapshot?) -> [Double] {
-        Array(((m == .gpu ? s?.gpuHistory : s?.cpuHistory) ?? []).suffix(graphBars))
+        let all: [Double]
+        switch m {
+        case .gpu: all = s?.gpuHistory ?? []
+        case .memory: all = s?.memoryHistory ?? []
+        default: all = s?.cpuHistory ?? []
+        }
+        return Array(all.suffix(graphBars))
+    }
+
+    /// Two-series graphs: up/down for network, read/write for disk (top/bottom line order matches
+    /// the rates and R/W elements).
+    private static func series(_ m: StatsModule, _ s: StatsSnapshot?) -> ([Double], [Double])? {
+        switch m {
+        case .network: return (Array((s?.netUpHistory ?? []).suffix(14)), Array((s?.netDownHistory ?? []).suffix(14)))
+        case .disk: return (Array((s?.diskReadHistory ?? []).suffix(14)), Array((s?.diskWriteHistory ?? []).suffix(14)))
+        default: return nil
+        }
     }
 
     static func fraction(_ m: StatsModule, _ s: StatsSnapshot?) -> Double {
         guard let s else { return 0 }
         switch m {
+        case .cpu: return s.cpu?.total ?? 0
+        case .gpu: return s.gpu ?? 0
         case .memory: return s.memory?.usedFraction ?? 0
         case .disk: return bootVolume(s)?.usedFraction ?? 0
-        default: return 0
+        case .battery: return Double(s.battery?.percent ?? 0) / 100
+        case .network, .sensors, .time, .ai: return 0
         }
     }
 
@@ -208,7 +325,17 @@ enum StatsRenderer {
         case .memory: return s.memory.map { StatFormat.percent($0.usedFraction) } ?? "–"
         case .disk: return bootVolume(s).map { StatFormat.percent($0.usedFraction) } ?? "–"
         case .battery: return s.battery.map { "\($0.percent)%" } ?? "–"
-        case .network, .sensors, .time: return "–"
+        case .network, .sensors, .time, .ai: return "–"
+        }
+    }
+
+    /// Used and free bytes: memory (free = what apps can still get) or the startup disk.
+    private static func amounts(_ m: StatsModule, _ s: StatsSnapshot?) -> (used: UInt64, free: UInt64)? {
+        guard let s else { return nil }
+        switch m {
+        case .memory: return s.memory.map { ($0.used, $0.total > $0.used ? $0.total - $0.used : 0) }
+        case .disk: return bootVolume(s).map { ($0.used, $0.free) }
+        default: return nil
         }
     }
 
@@ -221,9 +348,24 @@ enum StatsRenderer {
         return g >= 100 ? "\(Int(g)) GB" : String(format: "%.1f GB", g)
     }
 
-    private static func rateText(_ v: Double?, _ o: Options, short: Bool) -> String {
+    private static func rateText(_ v: Double?, _ o: Options) -> String {
         guard let v else { return "–" }
-        return short ? StatFormat.rate(v, compact: true, bits: o.bits) : StatFormat.rate(v, bits: o.bits)
+        return StatFormat.rate(v, bits: o.bits)
+    }
+
+    private static func temperatureText(_ s: StatsSnapshot?, _ o: Options) -> String {
+        s?.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "–"
+    }
+
+    private static func fanText(_ s: StatsSnapshot?) -> String {
+        s?.sensors?.fans.first.map { "\(Int($0.rpm)) rpm" } ?? "–"
+    }
+
+    private static func timeLeftText(_ s: StatsSnapshot?) -> String {
+        let b = s?.battery
+        if let mins = b?.minutesRemaining { return String(format: "%d:%02d", mins / 60, mins % 60) }
+        if b?.charged == true || (b?.onAC == true && b?.charging == false) { return "AC" }
+        return "–"
     }
 
     private static var clockFormatters: [String: DateFormatter] = [:]
@@ -239,9 +381,9 @@ enum StatsRenderer {
 
     // MARK: Primitives
 
-    private static func single(_ s: String, box: NSRect, align: NSTextAlignment = .right) {
-        let lineHeight = ceil(valueFont.ascender - valueFont.descender)
-        text(s, valueFont, NSRect(x: box.minX, y: box.minY + (box.height - lineHeight) / 2 - 0.5, width: box.width, height: lineHeight), align: align)
+    private static func single(_ s: String, box: NSRect, font: NSFont = valueFont, align: NSTextAlignment = .right) {
+        let lineHeight = ceil(font.ascender - font.descender)
+        text(s, font, NSRect(x: box.minX, y: box.minY + (box.height - lineHeight) / 2 - 0.5, width: box.width, height: lineHeight), align: align)
     }
 
     private static func twoLines(_ top: String, _ bottom: String, box: NSRect) {
@@ -250,7 +392,7 @@ enum StatsRenderer {
     }
 
     private static func label(_ s: String, x: CGFloat, top: Bool) {
-        text(s, lineFont, NSRect(x: x, y: top ? 10.5 : 0.5, width: 12, height: 11), align: .left)
+        text(s, lineFont, NSRect(x: x, y: top ? 10.5 : 0.5, width: 14, height: 11), align: .left)
     }
 
     private static func text(_ s: String, _ font: NSFont, _ r: NSRect, align: NSTextAlignment) {
@@ -289,6 +431,17 @@ enum StatsRenderer {
         path.fill()
     }
 
+    /// One vertical meter filled from the bottom.
+    private static func meter(_ fraction: Double, x: CGFloat) {
+        let track = NSRect(x: x, y: 3, width: meterWidth, height: 16)
+        NSColor.black.withAlphaComponent(0.25).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 1.2, yRadius: 1.2).fill()
+        let h = (16 * CGFloat(min(max(fraction, 0), 1))).rounded()
+        guard h >= 1 else { return }
+        NSColor.black.setFill()
+        NSBezierPath(roundedRect: NSRect(x: x, y: 3, width: meterWidth, height: h), xRadius: 1.2, yRadius: 1.2).fill()
+    }
+
     /// A disc whose filled wedge (clockwise from 12 o'clock) shows `fraction`.
     private static func pie(_ fraction: Double, center c: NSPoint) {
         let radius = pieSize / 2
@@ -306,6 +459,25 @@ enum StatsRenderer {
         wedge.appendArc(withCenter: c, radius: radius, startAngle: 90, endAngle: 90 - 360 * CGFloat(f), clockwise: true)
         wedge.close()
         wedge.fill()
+    }
+
+    /// A circular gauge: a faint track with an arc (clockwise from 12 o'clock) for `fraction`.
+    private static func ring(_ fraction: Double, center c: NSPoint) {
+        let lineWidth: CGFloat = 2.6
+        let radius = (pieSize - lineWidth) / 2
+        let track = NSBezierPath()
+        track.appendArc(withCenter: c, radius: radius, startAngle: 0, endAngle: 360)
+        track.lineWidth = lineWidth
+        NSColor.black.withAlphaComponent(0.25).setStroke()
+        track.stroke()
+        let f = min(max(fraction, 0), 1)
+        guard f > 0.005 else { return }
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: c, radius: radius, startAngle: 90, endAngle: 90 - 360 * CGFloat(min(f, 0.999)), clockwise: true)
+        arc.lineWidth = lineWidth
+        arc.lineCapStyle = .butt
+        NSColor.black.setStroke()
+        arc.stroke()
     }
 
     /// Bold arrow at a fixed spot: up on the top line, down on the bottom line.
@@ -362,39 +534,52 @@ enum StatsRenderer {
 
     /// Everything that determines the pixels of an item, so unchanged content is never re-sent to
     /// the menu bar (each update costs a few ms in the menu bar host across displays on macOS 26).
-    static func signature(_ m: StatsModule, _ mode: StatsMode, _ s: StatsSnapshot?, _ o: Options, now: Date = Date()) -> String {
-        if mode == .clock { return "clock|\(o.clockFormat)|\(clockText(o.clockFormat, now))" }
-        guard let s else { return "\(m.rawValue)|\(mode.rawValue)|nil" }
+    static func signature(_ m: StatsModule, _ elements: [StatsElement], _ s: StatsSnapshot?, _ o: Options, now: Date = Date()) -> String {
+        let head = "\(m.rawValue)|" + elements.map(\.rawValue).joined(separator: ",")
+        if m == .ai {
+            func sig(_ f: AIFigure?) -> String {
+                guard let f else { return "-" }
+                return AIFormat.tokens(f.tokens) + "/" + AIFormat.cost(f.cost) + "/" + f.windows.map { "\($0.minutes):\(Int($0.usedPercent.rounded()))" }.joined(separator: ",")
+            }
+            let parts = o.aiTags.isEmpty ? [sig(s?.ai?.total)] : o.aiTags.map { tag in sig(s?.ai?.perAgent.first { $0.agent.tag == tag }?.figure) }
+            return head + "|" + o.aiTags.joined(separator: ",") + (o.aiPlanLeft ? "|left|" : "|used|") + parts.joined(separator: "#")
+        }
+        guard let s else {
+            return elements.contains(.clock) ? head + "|" + clockText(o.clockFormat, now) : head + "|nil"
+        }
         func q(_ values: [Double], scale: Double = 1, steps: Double = 16) -> String {
             values.map { String(Int((min(max($0 / scale, 0), 1) * steps).rounded())) }.joined(separator: ",")
         }
-        let t: String
-        switch mode {
-        case .graphPercent: t = q(history(m, s)) + "|" + percentText(m, s)
-        case .graph:
-            if m == .network {
-                let peak = max(s.netDownHistory.suffix(14).max() ?? 0, s.netUpHistory.suffix(14).max() ?? 0, 1024)
-                t = q(Array(s.netUpHistory.suffix(14)), scale: peak, steps: 16) + "/" + q(Array(s.netDownHistory.suffix(14)), scale: peak, steps: 16)
-            } else {
-                t = q(history(m, s))
+        let parts: [String] = elements.map { e in
+            switch e {
+            case .label: return ""
+            case .graph:
+                if let (top, bottom) = series(m, s) {
+                    let peak = max(top.max() ?? 0, bottom.max() ?? 0, 1024)
+                    return q(top, scale: peak) + "/" + q(bottom, scale: peak)
+                }
+                return q(history(m, s))
+            case .bar: return String(Int((fraction(m, s) * 32).rounded()))
+            case .pie: return String(Int((fraction(m, s) * 52).rounded()))
+            case .ring: return String(Int((fraction(m, s) * 60).rounded()))
+            case .percent: return percentText(m, s)
+            case .cores: return q(s.cpu?.perCore ?? [])
+            case .usedFree: return amounts(m, s).map { StatFormat.compactAmount($0.used) + "/" + StatFormat.compactAmount($0.free) } ?? "-"
+            case .used: return amounts(m, s).map { gigs($0.used) } ?? "-"
+            case .free: return amounts(m, s).map { gigs($0.free) } ?? "-"
+            case .readWrite: return rateText(s.diskRead, o) + "/" + rateText(s.diskWrite, o)
+            case .rates: return rateText(s.netUp, o) + "/" + rateText(s.netDown, o)
+            case .temperature: return temperatureText(s, o)
+            case .fan: return fanText(s)
+            case .tempFan: return temperatureText(s, o) + "/" + fanText(s)
+            case .power: return s.sensors?.systemPower.map { String(format: "%.1f", $0) } ?? "-"
+            case .battery: return "\(s.battery?.percent ?? -1)|\(s.battery?.charging ?? false)"
+            case .timeLeft: return timeLeftText(s)
+            case .clock: return clockText(o.clockFormat, now)
+            case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo: return ""
             }
-        case .percent: t = percentText(m, s)
-        case .cores: t = q(s.cpu?.perCore ?? [])
-        case .pie: t = String(Int((fraction(m, s) * 52).rounded()))
-        case .piePercent: t = String(Int((fraction(m, s) * 52).rounded())) + "|" + percentText(m, s)
-        case .usedAmount: t = s.memory.map { gigs($0.used) } ?? "-"
-        case .freeAmount: t = bootVolume(s).map { gigs($0.free) } ?? "-"
-        case .activity: t = rateText(s.diskRead, o, short: false) + "/" + rateText(s.diskWrite, o, short: false)
-        case .rates: t = rateText(s.netUp, o, short: false) + "/" + rateText(s.netDown, o, short: false)
-        case .cpuTemperature: t = s.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "-"
-        case .temperatureAndFan:
-            t = (s.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "-") + "/" + (s.sensors?.fans.first.map { "\(Int($0.rpm))" } ?? "-")
-        case .power: t = s.sensors?.systemPower.map { String(format: "%.1f", $0) } ?? "-"
-        case .iconPercent: t = "\(s.battery?.percent ?? -1)|\(s.battery?.charging ?? false)"
-        case .timeRemaining: t = "\(s.battery?.minutesRemaining ?? -1)|\(s.battery?.charged ?? false)|\(s.battery?.onAC ?? false)"
-        case .clock: t = ""
         }
-        return "\(m.rawValue)|\(mode.rawValue)|\(t)"
+        return head + "|" + parts.joined(separator: "#")
     }
 
     static func accessibilityText(_ m: StatsModule, _ s: StatsSnapshot?, _ o: Options, now: Date = Date()) -> String {
@@ -403,12 +588,18 @@ enum StatsRenderer {
         switch m {
         case .cpu: return "CPU \(s.cpu.map { StatFormat.percent($0.total) } ?? "")"
         case .gpu: return "GPU \(s.gpu.map { StatFormat.percent($0) } ?? "")"
-        case .memory: return "Memory \(s.memory.map { StatFormat.percent($0.usedFraction) } ?? "")"
-        case .disk: return "Disk \(bootVolume(s).map { StatFormat.percent($0.usedFraction) } ?? "")"
+        case .memory:
+            let a = amounts(m, s)
+            return "Memory \(s.memory.map { StatFormat.percent($0.usedFraction) } ?? ""), used \(a.map { gigs($0.used) } ?? ""), free \(a.map { gigs($0.free) } ?? "")"
+        case .disk:
+            return "Disk \(bootVolume(s).map { StatFormat.percent($0.usedFraction) } ?? ""), read \(rateText(s.diskRead, o)), write \(rateText(s.diskWrite, o))"
         case .network: return "Network up \(StatFormat.rate(s.netUp, bits: o.bits)), down \(StatFormat.rate(s.netDown, bits: o.bits))"
-        case .sensors: return "CPU temperature \(s.sensors?.cpu.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "")"
+        case .sensors: return "CPU temperature \(temperatureText(s, o))"
         case .battery: return "Battery \(s.battery.map { "\($0.percent)%" } ?? "")"
         case .time: return ""
+        case .ai:
+            guard let a = s.ai else { return "AI usage" }
+            return "AI usage \(a.range.rawValue): \(AIFormat.tokens(a.total.tokens)) tokens, \(AIFormat.cost(a.total.cost))"
         }
     }
 }

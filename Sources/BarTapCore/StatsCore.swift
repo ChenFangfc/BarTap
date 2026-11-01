@@ -147,6 +147,15 @@ public enum StatFormat {
         return i == 0 ? "\(b) B" : String(format: "%.\(decimals)f %@", value, units[i])
     }
 
+    /// iStat-style short amounts for the two-line U:/F: element: 512M, 12.3G, 412G, 1.8T.
+    public static func compactAmount(_ b: UInt64) -> String {
+        let g = Double(b) / 1_073_741_824
+        if g < 1 { return "\(Int((g * 1024).rounded()))M" }
+        if g < 100 { return String(format: "%.1fG", g) }
+        if g < 1000 { return "\(Int(g.rounded()))G" }
+        return String(format: "%.1fT", g / 1024)
+    }
+
     public static func temperature(_ celsius: Double, fahrenheit: Bool) -> String {
         let v = fahrenheit ? celsius * 9 / 5 + 32 : celsius
         return "\(Int(v.rounded()))°"
@@ -225,26 +234,97 @@ public enum SensorClassifier {
 // MARK: Modules & settings
 
 public enum StatsModule: String, CaseIterable {
-    case cpu, gpu, memory, disk, network, sensors, battery, time
+    case cpu, gpu, memory, disk, network, sensors, battery, time, ai
 
-    /// Display modes offered for the menu bar, first = default (the classic iStat layouts).
-    public var modes: [StatsMode] {
+    /// Elements this module can show, in the order the editor lists them.
+    public var elements: [StatsElement] {
         switch self {
-        case .cpu: return [.graphPercent, .graph, .percent, .cores]
-        case .gpu: return [.graphPercent, .graph, .percent]
-        case .memory: return [.piePercent, .pie, .percent, .usedAmount]
-        case .disk: return [.piePercent, .pie, .percent, .freeAmount, .activity]
-        case .network: return [.rates, .graph]
-        case .sensors: return [.cpuTemperature, .temperatureAndFan, .power]
-        case .battery: return [.iconPercent, .percent, .timeRemaining]
+        case .cpu: return [.label, .graph, .bar, .pie, .ring, .percent, .cores]
+        case .gpu: return [.label, .graph, .bar, .pie, .ring, .percent]
+        case .memory: return [.label, .graph, .bar, .pie, .ring, .percent, .usedFree, .used, .free]
+        case .disk: return [.label, .graph, .bar, .pie, .ring, .percent, .usedFree, .used, .free, .readWrite]
+        case .network: return [.label, .graph, .rates]
+        case .sensors: return [.label, .temperature, .fan, .tempFan, .power]
+        case .battery: return [.label, .battery, .percent, .timeLeft]
         case .time: return [.clock]
+        case .ai: return [.label, .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo]
         }
+    }
+
+    /// Ready-made combinations; the first is the default (the classic iStat Menus layout).
+    public var presets: [[StatsElement]] {
+        switch self {
+        case .cpu: return [[.graph, .percent], [.graph], [.percent], [.cores], [.bar, .percent], [.ring, .percent], [.label, .percent], [.label, .graph, .percent]]
+        case .gpu: return [[.graph, .percent], [.graph], [.percent], [.bar, .percent], [.ring, .percent], [.label, .percent]]
+        case .memory: return [[.pie, .percent], [.usedFree], [.pie, .usedFree], [.pie], [.percent], [.used], [.bar, .percent], [.ring, .percent], [.graph, .percent], [.label, .percent]]
+        case .disk: return [[.pie, .percent], [.readWrite], [.pie, .readWrite], [.usedFree], [.free], [.pie], [.percent], [.graph, .readWrite], [.label, .percent]]
+        case .network: return [[.rates], [.graph], [.graph, .rates], [.label, .rates]]
+        case .sensors: return [[.temperature], [.tempFan], [.temperature, .fan], [.power], [.label, .temperature]]
+        case .battery: return [[.battery, .percent], [.percent], [.timeLeft], [.battery], [.battery, .timeLeft]]
+        case .time: return [[.clock]]
+        case .ai: return [[.aiTokensCost], [.aiCost], [.label, .aiTokens], [.aiPlan, .aiPlanPercent], [.aiPlanTwo], [.label, .aiTokensCost]]
+        }
+    }
+
+    /// Keeps only elements this module offers, without repeats; nil if nothing is left.
+    public func sanitized(_ list: [StatsElement]) -> [StatsElement]? {
+        var seen = Set<StatsElement>()
+        let out = list.filter { elements.contains($0) && seen.insert($0).inserted }
+        return out.isEmpty ? nil : out
     }
 }
 
-public enum StatsMode: String, CaseIterable {
-    case percent, graph, graphPercent, cores, pie, piePercent, usedAmount, freeAmount, activity, rates
-    case cpuTemperature, temperatureAndFan, power, iconPercent, timeRemaining, clock
+/// One piece of a stats menu bar item. An item is an ordered list of these, like iStat Menus'
+/// "items to show in menubar", so people can combine and order them as they like.
+public enum StatsElement: String, CaseIterable {
+    case label        // short module name: CPU, GPU, MEM…
+    case graph        // history (CPU, GPU, memory); read/write activity (disk); up/down (network)
+    case bar          // one vertical meter
+    case pie          // filled wedge
+    case ring         // circular gauge
+    case percent      // 37%
+    case cores        // per-core bars (CPU)
+    case usedFree     // two lines: U: 12.3G / F: 3.4G
+    case used         // 12.3 GB
+    case free         // 412 GB
+    case readWrite    // two lines: R / W rates, labels fixed
+    case rates        // two lines: ↑ / ↓ rates, arrows fixed
+    case temperature  // 46°
+    case fan          // 1350 rpm
+    case tempFan      // two lines: 46° / 1350 rpm
+    case power        // 8.4 W
+    case battery      // battery glyph
+    case timeLeft     // 3:12
+    case clock        // the time
+    case aiTokens     // 4.6M tokens in the chosen range
+    case aiCost       // $12.34, API-equivalent
+    case aiTokensCost // two lines: tokens / cost
+    case aiPlan       // ring: the plan window closest to its limit
+    case aiPlanPercent // 43%
+    case aiPlanTwo    // two lines: 5h 43% / 7d 61%
+
+    /// The single display mode of BarTap 1.0, as elements.
+    public static func fromLegacyMode(_ mode: String) -> [StatsElement]? {
+        switch mode {
+        case "graphPercent": return [.graph, .percent]
+        case "graph": return [.graph]
+        case "percent": return [.percent]
+        case "cores": return [.cores]
+        case "pie": return [.pie]
+        case "piePercent": return [.pie, .percent]
+        case "usedAmount": return [.used]
+        case "freeAmount": return [.free]
+        case "activity": return [.readWrite]
+        case "rates": return [.rates]
+        case "cpuTemperature": return [.temperature]
+        case "temperatureAndFan": return [.tempFan]
+        case "power": return [.power]
+        case "iconPercent": return [.battery, .percent]
+        case "timeRemaining": return [.timeLeft]
+        case "clock": return [.clock]
+        default: return nil
+        }
+    }
 }
 
 /// Data usage per day and per month, accumulated from interface counter deltas.
@@ -300,24 +380,36 @@ public struct AlertSettings: Equatable {
 }
 
 public extension Settings {
+    /// Enabled modules, in menu bar order (left to right).
     var statsModules: [StatsModule] {
-        get { (defaults.stringArray(forKey: "stats.modules") ?? []).compactMap(StatsModule.init(rawValue:)) }
+        get {
+            var seen = Set<StatsModule>()
+            return (defaults.stringArray(forKey: "stats.modules") ?? []).compactMap(StatsModule.init(rawValue:)).filter { seen.insert($0).inserted }
+        }
         set {
-            defaults.set(newValue.map(\.rawValue), forKey: "stats.modules")
+            var seen = Set<StatsModule>()
+            defaults.set(newValue.filter { seen.insert($0).inserted }.map(\.rawValue), forKey: "stats.modules")
             NotificationCenter.default.post(name: .barTapSettingsChanged, object: self, userInfo: ["key": "stats"])
         }
     }
 
-    func statsMode(_ m: StatsModule) -> StatsMode {
-        if let raw = defaults.string(forKey: "stats.mode.\(m.rawValue)"), let mode = StatsMode(rawValue: raw), m.modes.contains(mode) {
-            return mode
+    /// What one module's menu bar item shows, left to right.
+    func statsElements(_ m: StatsModule) -> [StatsElement] {
+        if let raw = defaults.stringArray(forKey: "stats.elements.\(m.rawValue)"),
+           let list = m.sanitized(raw.compactMap(StatsElement.init(rawValue:))) {
+            return list
         }
-        return m.modes[0]
+        // BarTap 1.0 stored one display mode per module.
+        if let raw = defaults.string(forKey: "stats.mode.\(m.rawValue)"), let legacy = StatsElement.fromLegacyMode(raw),
+           let list = m.sanitized(legacy) {
+            return list
+        }
+        return m.presets[0]
     }
 
-    func setStatsMode(_ m: StatsModule, _ mode: StatsMode) {
-        guard m.modes.contains(mode) else { return }
-        defaults.set(mode.rawValue, forKey: "stats.mode.\(m.rawValue)")
+    func setStatsElements(_ m: StatsModule, _ list: [StatsElement]) {
+        guard let clean = m.sanitized(list) else { return }
+        defaults.set(clean.map(\.rawValue), forKey: "stats.elements.\(m.rawValue)")
         NotificationCenter.default.post(name: .barTapSettingsChanged, object: self, userInfo: ["key": "stats"])
     }
 
@@ -401,7 +493,7 @@ public extension Settings {
         }
     }
 
-    private func post(_ key: String) {
+    internal func post(_ key: String) {
         NotificationCenter.default.post(name: .barTapSettingsChanged, object: self, userInfo: ["key": key])
     }
 }

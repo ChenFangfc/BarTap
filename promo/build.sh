@@ -50,7 +50,7 @@ cp "$OUT" "docs/media/bartap-film-$LANG_CODE.mp4"
 if [[ $LANG_CODE == en ]]; then
   swiftc -O promo/shots.swift -o .build/shots
   .build/shots "$PWD" >/dev/null
-  for f in docs/media/{bar,panels}-{light,dark}.png; do
+  for f in docs/media/{bar,panels,layouts}-{light,dark}.png; do
     cwebp -quiet -lossless -m 6 "$f" -o "${f%.png}.webp" && rm "$f"
   done
 fi

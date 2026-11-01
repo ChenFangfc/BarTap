@@ -6,3 +6,5 @@ dist/
 # Promo intermediates (the finished media lives in docs/media/)
 promo/out/
 promo/assets/
+# Signing keychain password (never commit)
+.signing/

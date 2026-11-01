@@ -23,8 +23,8 @@ enum DebugRender {
     /// Menu bar images composited on a light and a dark bar, at 2x.
     static func statusImages(_ snapshot: StatsSnapshot?, options: StatsRenderer.Options) {
         for m in StatsModule.allCases {
-            for mode in m.modes {
-                let img = StatsRenderer.image(m, mode, snapshot, options)
+            for elements in m.presets {
+                let img = StatsRenderer.image(m, elements, snapshot, options)
                 let w = img.size.width + 8, h: CGFloat = 26
                 for (suffix, bg, fg) in [("light", NSColor(white: 0.93, alpha: 1), NSColor.black), ("dark", NSColor(white: 0.16, alpha: 1), NSColor.white)] {
                     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(w * 2), pixelsHigh: Int(h * 2), bitsPerSample: 8,
@@ -43,7 +43,7 @@ enum DebugRender {
                     }
                     tinted.draw(at: NSPoint(x: 4, y: 2), from: .zero, operation: .sourceOver, fraction: 1)
                     NSGraphicsContext.restoreGraphicsState()
-                    write(rep, "item_\(m.rawValue)_\(mode.rawValue)_\(suffix)")
+                    write(rep, "item_\(m.rawValue)_\(elements.map(\.rawValue).joined(separator: "+"))_\(suffix)")
                 }
             }
         }
@@ -83,49 +83,59 @@ enum JitterCheck {
         return out
     }
 
+    /// Very different values for every module: tiny, typical and huge.
+    private static func snapshots() -> [StatsSnapshot] {
+        let gb: UInt64 = 1_073_741_824
+        return [(0.0, 0.0, 0.01), (512.0, 1536.0, 0.5), (999_000.0, 12_345_678.0, 0.999), (1.2e9, 3.0, 0.2)].map { up, down, f in
+            var s = StatsSnapshot()
+            s.netUp = up; s.netDown = down
+            s.diskRead = down; s.diskWrite = up
+            s.cpuHistory = [0.1, 0.3, 0.5, 0.2, 0.9, 0.4, 0.6, 0.3, 0.8, 0.5]
+            s.cpu = CPUUsage(total: f, user: f / 2, system: f / 2, perCore: [f, 1 - f])
+            s.gpu = f
+            s.memory = MemoryBreakdown(total: 64 * gb, app: UInt64(f * 60) * gb + 300_000_000, wired: 0, compressed: 0, cached: 0, free: 0)
+            s.volumes = [VolumeInfo(name: "Disk", mountPoint: "/", total: 4096 * gb, free: UInt64((1 - f) * 4000) * gb + 1)]
+            s.sensors = SensorReadings(cpu: 20 + f * 90, cpuMax: nil, gpu: nil, battery: nil, storage: nil, ambient: nil,
+                                       fans: [FanReading(rpm: f * 9000, min: 0, max: 9000)], systemPower: f * 150)
+            s.battery = BatteryInfo(percent: Int(f * 100), charging: f < 0.5, onAC: true, charged: false, minutesRemaining: Int(f * 5999))
+            return s
+        }
+    }
+
+    /// Pixels of the element at `index` within `elements` (an item's fixed glyph region).
+    private static func region(_ img: NSImage, _ m: StatsModule, _ elements: [StatsElement], _ index: Int, upTo width: CGFloat, _ o: StatsRenderer.Options) -> [UInt8] {
+        var x = StatsRenderer.inset
+        for e in elements.prefix(index) { x += StatsRenderer.elementWidth(e, m, o) + StatsRenderer.gap }
+        return alphaColumns(img, fromX: x, toX: x + width)
+    }
+
     static func run() -> [String: Bool] {
         let o = StatsRenderer.Options()
+        let shots = snapshots()
         var results: [String: Bool] = [:]
 
-        // Network: arrows must be pixel-identical whatever the rates are.
-        let rates: [(Double, Double)] = [(0, 0), (512, 1536), (999_000, 12_345_678), (5_000, 999), (1.2e9, 3)]
-        var arrowRegions: [[UInt8]] = []
-        var widths = Set<CGFloat>()
-        for (up, down) in rates {
-            var s = StatsSnapshot()
-            s.netUp = up
-            s.netDown = down
-            let img = StatsRenderer.image(.network, .rates, s, o)
-            widths.insert(img.size.width)
-            arrowRegions.append(alphaColumns(img, fromX: 0, toX: 1 + StatsRenderer.arrowWidth + 1))
+        // Fixed glyphs must be pixel-identical whatever the values are.
+        func fixed(_ m: StatsModule, _ elements: [StatsElement], index: Int, width: CGFloat) -> Bool {
+            let regions = shots.map { region(StatsRenderer.image(m, elements, $0, o), m, elements, index, upTo: width, o) }
+            return Set(regions.map(\.description)).count == 1 && !(regions.first?.isEmpty ?? true)
         }
-        results["networkArrowsFixed"] = Set(arrowRegions.map { $0.description }).count == 1 && !(arrowRegions.first?.isEmpty ?? true)
-        results["networkWidthConstant"] = widths.count == 1
+        results["networkArrowsFixed"] = fixed(.network, [.rates], index: 0, width: StatsRenderer.arrowWidth + 1)
+        results["diskReadWriteLabelsFixed"] = fixed(.disk, [.readWrite], index: 0, width: 6)
+        results["memoryUsedFreeLabelsFixed"] = fixed(.memory, [.usedFree], index: 0, width: 9)
+        results["arrowsFixedAfterGraph"] = fixed(.network, [.graph, .rates], index: 1, width: StatsRenderer.arrowWidth + 1)
+        results["labelFixed"] = fixed(.cpu, [.label, .percent], index: 0, width: StatsRenderer.elementWidth(.label, .cpu, o))
+        // CPU: the graph stays identical while only the percentage changes.
+        results["cpuGraphFixed"] = fixed(.cpu, [.graph, .percent], index: 0, width: StatsRenderer.graphWidth)
 
-        // CPU: the graph must be identical while only the percentage changes (9% → 100%).
-        var graphRegions: [[UInt8]] = []
-        var cpuWidths = Set<CGFloat>()
-        for total in [0.09, 0.42, 1.0, 0.0] {
-            var s = StatsSnapshot()
-            s.cpuHistory = [0.1, 0.3, 0.5, 0.2, 0.9, 0.4, 0.6, 0.3, 0.8, 0.5]
-            s.cpu = CPUUsage(total: total, user: total / 2, system: total / 2, perCore: [])
-            let img = StatsRenderer.image(.cpu, .graphPercent, s, o)
-            cpuWidths.insert(img.size.width)
-            graphRegions.append(alphaColumns(img, fromX: 0, toX: 1 + StatsRenderer.graphWidth))
+        // Every element and every preset keeps one width whatever the values.
+        var constant = true
+        for m in StatsModule.allCases {
+            for elements in m.elements.map({ [$0] }) + m.presets {
+                let widths = Set(shots.map { StatsRenderer.image(m, elements, $0, o).size.width })
+                constant = constant && widths.count == 1 && widths.first == StatsRenderer.width(m, elements, o)
+            }
         }
-        results["cpuGraphFixed"] = Set(graphRegions.map { $0.description }).count == 1
-        results["cpuWidthConstant"] = cpuWidths.count == 1
-
-        // Memory / disk pie + percentage, battery, clock: constant width whatever the value.
-        var other = true
-        for f in [0.01, 0.5, 0.999] {
-            var s = StatsSnapshot()
-            s.memory = MemoryBreakdown(total: 100, app: UInt64(f * 100), wired: 0, compressed: 0, cached: 0, free: 0)
-            s.battery = BatteryInfo(percent: Int(f * 100), charging: f < 0.5, onAC: true, charged: false)
-            other = other && StatsRenderer.image(.memory, .piePercent, s, o).size.width == StatsRenderer.width(.memory, .piePercent, o)
-            other = other && StatsRenderer.image(.battery, .iconPercent, s, o).size.width == StatsRenderer.width(.battery, .iconPercent, o)
-        }
-        results["otherWidthsConstant"] = other
+        results["allWidthsConstant"] = constant
         return results
     }
 }

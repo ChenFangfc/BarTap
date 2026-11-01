@@ -2,7 +2,7 @@
 //
 //   swiftc -O promo/shots.swift -o .build/shots && .build/shots <repo>
 //
-// Writes docs/media/{bar,panels}-{light,dark}.png.
+// Writes docs/media/{bar,panels,layouts}-{light,dark}.png.
 import AppKit
 
 let root = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
@@ -51,7 +51,7 @@ func card(_ r: NSRect, radius: CGFloat, dark: Bool, fill: NSColor, shadowBlur: C
 }
 
 // 1. A menu bar strip: the toggle and every stats module, as BarTap draws them.
-let items = ["toggle_collapsed", "cpu_3", "gpu_3", "memory_3", "disk_3", "network_3", "sensors_3", "battery_3", "time_3"]
+let items = ["toggle_collapsed", "cpu_3", "gpu_3", "memory_3", "disk_3", "network_3", "sensors_3", "battery_3", "ai_3", "time_3"]
     .map { asset("items/\($0).png") }
 let gap: CGFloat = 12, pad: CGFloat = 14, barH: CGFloat = 30, margin: CGFloat = 18
 let contentW = items.reduce(0) { $0 + $1.size.width } + gap * CGFloat(items.count - 1)
@@ -70,7 +70,7 @@ for dark in [false, true] {
 
 // 2. Three dropdowns side by side.
 for dark in [false, true] {
-    let panels = ["cpu", "network", "sensors"].map { asset("panel_\($0)_\(dark ? "dark" : "light").png") }
+    let panels = ["cpu", "network", "ai"].map { asset("panel_\($0)_\(dark ? "dark" : "light").png") }
     let pg: CGFloat = 28, m: CGFloat = 36
     let w = panels.reduce(0) { $0 + $1.size.width } + pg * CGFloat(panels.count - 1) + 2 * m
     let h = (panels.map(\.size.height).max() ?? 0) + 2 * m
@@ -87,6 +87,38 @@ for dark in [false, true] {
             path.lineWidth = 1
             path.stroke()
             x += p.size.width + pg
+        }
+    }
+}
+
+// 3. Layouts: a few combinations per module, each on its own menu-bar strip.
+let rows: [(String, [String])] = [
+    ("CPU", ["cpu-preset0", "cpu-preset5", "cpu-preset4", "cpu-preset3", "cpu-preset7"]),
+    ("Memory", ["memory-preset1", "memory-preset2", "memory-preset0", "memory-preset7", "memory-preset5"]),
+    ("Disk", ["disk-preset1", "disk-preset2", "disk-preset3", "disk-preset7", "disk-preset0"]),
+    ("Network · Sensors · Battery", ["network-preset0", "network-preset2", "sensors-preset1", "battery-preset0", "battery-preset4"]),
+    ("AI usage", ["ai-preset5", "ai-preset1", "ai-preset3", "ai-preset4", "ai-peragent0"]),
+]
+let chipGap: CGFloat = 10, chipPad: CGFloat = 8, rowH: CGFloat = 30, labelW: CGFloat = 190, lm: CGFloat = 20
+let rowImages = rows.map { ($0.0, $0.1.map { asset("gallery/\($0).png") }) }
+let rowWidths = rowImages.map { $0.1.reduce(0) { $0 + $1.size.width + 2 * chipPad } + chipGap * CGFloat($0.1.count - 1) }
+let layoutsW = labelW + (rowWidths.max() ?? 0) + 2 * lm
+let layoutsH = CGFloat(rows.count) * (rowH + 14) + 2 * lm - 14
+for dark in [false, true] {
+    render(NSSize(width: layoutsW, height: layoutsH), scale: 3, "layouts-\(dark ? "dark" : "light").png") {
+        let ink = dark ? NSColor.white : NSColor(white: 0.08, alpha: 1)
+        for (r, (title, images)) in rowImages.enumerated() {
+            let y = layoutsH - lm - CGFloat(r + 1) * rowH - CGFloat(r) * 14
+            let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            let str = NSAttributedString(string: title, attributes: [.font: font, .foregroundColor: ink.withAlphaComponent(0.7)])
+            str.draw(at: NSPoint(x: lm, y: y + (rowH - str.size().height) / 2))
+            var x = lm + labelW
+            for img in images {
+                let chip = NSRect(x: x, y: y, width: img.size.width + 2 * chipPad, height: rowH)
+                _ = card(chip, radius: 7, dark: dark, fill: dark ? NSColor(white: 0.14, alpha: 1) : NSColor(white: 0.975, alpha: 1), shadowBlur: 6)
+                tinted(img, ink).draw(in: NSRect(x: chip.minX + chipPad, y: chip.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
+                x = chip.maxX + chipGap
+            }
         }
     }
 }

@@ -9,6 +9,8 @@ final class GraphView: NSView {
     var colors: [NSColor] = [.systemBlue]
     /// nil = scale to the largest value shown (rates); otherwise values are fractions of this.
     var fixedMax: Double? = 1
+    /// With fixedMax nil, the scale never goes below this (1 KB/s keeps idle network flat).
+    var minimumPeak: Double = 1024
     var caption: String = "" { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { false }
@@ -18,7 +20,9 @@ final class GraphView: NSView {
         // withAlphaComponent replaces a system color's alpha, so start from the opaque label color.
         NSColor.labelColor.withAlphaComponent(0.05).setFill()
         NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
-        let peak = fixedMax ?? max(series.flatMap { $0 }.max() ?? 0, 1024)
+        let peak = fixedMax ?? max(series.flatMap { $0 }.max() ?? 0, minimumPeak)
+        // A caption gets its own band, so the highest value never runs through the text.
+        let usable = r.height - 4 - (caption.isEmpty ? 0 : 15)
         for (i, values) in series.enumerated() where values.count >= 2 {
             let color = colors[i % colors.count]
             let step = r.width / CGFloat(89)
@@ -26,7 +30,7 @@ final class GraphView: NSView {
             let path = NSBezierPath()
             path.move(to: NSPoint(x: start, y: r.minY))
             for (j, v) in values.enumerated() {
-                path.line(to: NSPoint(x: start + CGFloat(j) * step, y: r.minY + (r.height - 4) * CGFloat(min(max(v / peak, 0), 1))))
+                path.line(to: NSPoint(x: start + CGFloat(j) * step, y: r.minY + usable * CGFloat(min(max(v / peak, 0), 1))))
             }
             path.line(to: NSPoint(x: start + CGFloat(values.count - 1) * step, y: r.minY))
             path.close()
@@ -34,7 +38,7 @@ final class GraphView: NSView {
             path.fill()
             let line = NSBezierPath()
             for (j, v) in values.enumerated() {
-                let p = NSPoint(x: start + CGFloat(j) * step, y: r.minY + (r.height - 4) * CGFloat(min(max(v / peak, 0), 1)))
+                let p = NSPoint(x: start + CGFloat(j) * step, y: r.minY + usable * CGFloat(min(max(v / peak, 0), 1)))
                 j == 0 ? line.move(to: p) : line.line(to: p)
             }
             color.setStroke()
@@ -122,12 +126,14 @@ class StatsPanel: NSView {
         return g
     }
 
-    func section(_ title: String) {
+    @discardableResult
+    func section(_ title: String) -> NSTextField {
         let l = NSTextField(labelWithString: title.uppercased())
         l.font = .systemFont(ofSize: 10, weight: .semibold)
         l.textColor = .tertiaryLabelColor
         stack.setCustomSpacing(10, after: stack.arrangedSubviews.last ?? l)
         stack.addArrangedSubview(l)
+        return l
     }
 
     /// A label/value row; returns the value field for updates. `key` lets callers find it again.

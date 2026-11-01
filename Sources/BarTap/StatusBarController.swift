@@ -202,6 +202,18 @@ final class StatusBarController: NSObject {
                              alwaysHidden: alwaysItem.map { normalized($0) })
     }
 
+    /// Stored order keys of our items, or nil while any of them has none yet.
+    func ownKeys() -> OwnItemKeys? {
+        let d = UserDefaults.standard
+        func key(_ name: String) -> Double? { d.object(forKey: Self.preferredPositionKey(name)) as? Double }
+        guard let toggle = key(Name.toggle), let hidden = key(Name.hidden) else { return nil }
+        if alwaysItem != nil {
+            guard let always = key(Name.always) else { return nil }
+            return OwnItemKeys(toggle: toggle, hidden: hidden, alwaysHidden: always)
+        }
+        return OwnItemKeys(toggle: toggle, hidden: hidden, alwaysHidden: nil)
+    }
+
     // MARK: Clean mode
 
     var isCleanModeOn: Bool { cleanSeparator != nil }

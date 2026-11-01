@@ -7,7 +7,7 @@
 import AppKit
 
 let W: CGFloat = 1920, H: CGFloat = 1080, FPS = 30.0
-let duration = 32.4
+let duration = 37.2
 let root = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
 /// "frames" (default), a time in seconds (one still for review), or "cues" (sound cues as JSON).
 let mode = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "frames"
@@ -23,6 +23,7 @@ let S: [String: String] = zh ? [
     "tuck": "一条分隔线，图标就收起来了。", "tuck2": "其余什么都不动。",
     "tap": "点一下显示，再点一下收起。", "tap2": "",
     "stats": "实时系统监控，就在菜单栏里。", "stats2": "CPU · GPU · 内存 · 磁盘 · 网络 · 传感器 · 电池 · 时间，每秒刷新",
+    "ai": "AI 编程用量，也一眼看清。", "ai2": "Claude Code、Codex、Gemini CLI 等：token、按 API 价折算的费用、套餐额度",
     "all": "菜单栏管理该有的，都有。", "all2": "就是不会抽动。",
     "search": "搜索任意图标", "shelf": "刘海下方的图标架", "rules": "自动规则与快捷键", "clean": "一键干净菜单栏",
     "idle": "空闲时 CPU", "mem": "内存", "fakes": "伪造点击",
@@ -34,6 +35,7 @@ let S: [String: String] = zh ? [
     "tuck": "One divider. Icons tuck away.", "tuck2": "Nothing else moves.",
     "tap": "Tap to show. Tap to hide.", "tap2": "",
     "stats": "Live system stats, right in the bar.", "stats2": "CPU · GPU · memory · disk · network · sensors · battery · time, every second",
+    "ai": "Your AI coding usage, too.", "ai2": "Claude Code, Codex, Gemini CLI and more: tokens, cost at API prices, plan limits",
     "all": "Everything a menu bar manager should do.", "all2": "Without the twitching.",
     "search": "Search any icon", "shelf": "Shelf below the notch", "rules": "Rules & hotkeys", "clean": "Clean menu bar",
     "idle": "CPU when idle", "mem": "memory", "fakes": "fake clicks",
@@ -73,6 +75,7 @@ func item(_ name: String, _ step: Int) -> NSImage {
 let toggleCollapsed = asset("promo/assets/items/toggle_collapsed.png")
 let toggleRevealed = asset("promo/assets/items/toggle_revealed.png")
 let cpuPanel = asset("promo/assets/panel_cpu_light.png")
+let aiPanel = asset("promo/assets/panel_ai_light.png")
 
 func symbol(_ name: String, _ size: CGFloat) -> NSImage {
     let cfg = NSImage.SymbolConfiguration(pointSize: size, weight: .regular)
@@ -211,6 +214,26 @@ func drawItem(_ img: NSImage, right: CGFloat, alpha: Double, dy: CGFloat = 0) ->
     return right - w
 }
 
+/// A dropdown under a bar item: the top `crop` of a panel image, unrolling with `reveal`.
+func dropdown(_ panel: NSImage, under item: NSRect, crop: CGFloat, scale: CGFloat, reveal: CGFloat) {
+    let pw = panel.size.width * scale, ph = panel.size.height * scale * crop
+    let px = min(item.midX - pw / 2, W - pw - 40)
+    NSGraphicsContext.saveGraphicsState()
+    let clip = NSBezierPath(roundedRect: NSRect(x: px, y: barRect.maxY + 10, width: pw, height: ph * reveal), xRadius: 14, yRadius: 14)
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.18 * reveal)
+    shadow.shadowBlurRadius = 40
+    shadow.shadowOffset = NSSize(width: 0, height: -14)
+    shadow.set()
+    NSColor.white.setFill()
+    clip.fill()
+    clip.addClip()
+    let src = NSRect(x: 0, y: panel.size.height * (1 - crop), width: panel.size.width, height: panel.size.height * crop)
+    panel.draw(in: NSRect(x: px, y: barRect.maxY + 10, width: pw, height: ph), from: src, operation: .sourceOver,
+               fraction: reveal, respectFlipped: true, hints: nil)
+    NSGraphicsContext.restoreGraphicsState()
+}
+
 func cursor(at p: CGPoint, alpha: Double, pressed: Bool = false) {
     guard alpha > 0.001 else { return }
     let s: CGFloat = pressed ? 0.9 : 1
@@ -277,11 +300,12 @@ func drawMark(center c: CGPoint, width w: CGFloat, progress p: Double, alpha: Do
 // MARK: - Timeline
 
 // Every event sits on the 100 BPM grid (beat 0.6 s, eighth 0.3 s) so the music can hit it.
-let s1 = 0.0, s2 = 4.2, s3 = 8.4, s4 = 12.6, s5 = 18.0, s6 = 23.4, s7 = 27.0
+let s1 = 0.0, s2 = 4.2, s3 = 8.4, s4 = 12.6, s5 = 18.0, s6 = 23.4, s7 = 28.2, s8 = 31.8
 let land = s4                          // the mark settles into the bar
 let collapseAt = s4 + 1.2, tap1 = s4 + 3.0, tap2 = s4 + 4.2
 let cpuClick = s5 + 1.8
-let endAt = s7 + 2.4
+let aiItemTime = s6 + 0.3, aiClick = s6 + 1.8
+let endAt = s8 + 2.4
 /// S1: when each third-party icon appears: accelerating, on a 16th-note grid.
 let popTimes: [Double] = {
     var out: [Double] = []
@@ -292,8 +316,8 @@ let popTimes: [Double] = {
     return out
 }()
 let itemTimes = (0..<3).map { s5 + 0.15 + 0.15 * Double($0) }
-let cardTimes = (0..<4).map { s6 + 0.3 + 0.3 * Double($0) }
-let numberTimes = (0..<3).map { s7 + 0.3 * Double($0) }
+let cardTimes = (0..<4).map { s7 + 0.3 + 0.3 * Double($0) }
+let numberTimes = (0..<3).map { s8 + 0.3 * Double($0) }
 let hopTimes = Array(stride(from: s2 + 0.3, to: s3, by: 0.3))   // S2's teleporting cursor
 
 // MARK: - Scenes
@@ -387,16 +411,25 @@ func frame(_ t: Double) {
         caption("never", "never2", t: t, a: s3 + 0.9, b: s4 - 0.2)
     }
 
-    // ---- S5: live stats + a dropdown. -----------------------------------------------------------
-    if t >= s5, t < s6 + 0.4 {
-        let barA = 1 - prog(t, s6, s6 + 0.4)
+    // ---- S5 + S6: live stats + a dropdown, then AI usage + its dropdown. -----------------------
+    if t >= s5, t < s7 + 0.4 {
+        let barA = 1 - prog(t, s7, s7 + 0.4)
         drawBar(alpha: barA)
         drawClock(alpha: barA)
         let step = Int((t - s5) * 2)   // values change twice a second
-        drawIcons(Array(systemIcons.prefix(1)), right: clockLeft, alpha: barA)
-        // Stats appear right of the toggle, which slides left to make room (as in the real bar).
+        // Later the AI usage item cross-fades into Control Center's slot (it leaves to make room,
+        // like Wi-Fi did), so the toggle stays clear of the notch. Its value matches the dropdown.
+        let aiIn = easeOut(prog(t, aiItemTime, aiItemTime + 0.45))
+        drawIcons(Array(systemIcons.prefix(1)), right: clockLeft, alpha: barA * (1 - aiIn))
         let gap = 7 * k
-        var right = clockLeft - systemIcons[0].width * k - 4
+        var aiRect = NSRect.zero
+        if aiIn > 0.001 {
+            let r = clockLeft - 12
+            let left = drawItem(item("ai", 3), right: r, alpha: barA * aiIn)
+            aiRect = NSRect(x: left, y: barRect.minY, width: r - left, height: barRect.height)
+        }
+        // Stats appear right of the toggle, which slides left to make room (as in the real bar).
+        var right = clockLeft - lerp(systemIcons[0].width * k + 4, 12 + item("ai", 3).size.width * k + gap, aiIn)
         var cpuRect = NSRect.zero
         for (i, n) in ["network", "memory", "cpu"].enumerated() {
             let a = barA * easeOut(prog(t, itemTimes[i], itemTimes[i] + 0.45))
@@ -407,36 +440,26 @@ func frame(_ t: Double) {
         drawItem(toggleCollapsed, right: lerp(s4ToggleRight, right, ease(prog(t, s5, s5 + 0.7))), alpha: barA)
         // Click on CPU → dropdown (its top half, large enough to read).
         let open = ease(prog(t, cpuClick, cpuClick + 0.4)) * (1 - ease(prog(t, s6 - 0.5, s6 - 0.1)))
-        if open > 0.001 {
-            let crop: CGFloat = 0.5, scale: CGFloat = 1.6
-            let pw = cpuPanel.size.width * scale, ph = cpuPanel.size.height * scale * crop
-            let px = min(cpuRect.midX - pw / 2, W - pw - 40)
-            let reveal = CGFloat(open)
-            NSGraphicsContext.saveGraphicsState()
-            let clip = NSBezierPath(roundedRect: NSRect(x: px, y: barRect.maxY + 10, width: pw, height: ph * reveal), xRadius: 14, yRadius: 14)
-            let shadow = NSShadow()
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.18 * reveal)
-            shadow.shadowBlurRadius = 40
-            shadow.shadowOffset = NSSize(width: 0, height: -14)
-            shadow.set()
-            NSColor.white.setFill()
-            clip.fill()
-            clip.addClip()
-            let src = NSRect(x: 0, y: cpuPanel.size.height * (1 - crop), width: cpuPanel.size.width, height: cpuPanel.size.height * crop)
-            cpuPanel.draw(in: NSRect(x: px, y: barRect.maxY + 10, width: pw, height: ph), from: src, operation: .sourceOver,
-                          fraction: reveal, respectFlipped: true, hints: nil)
-            NSGraphicsContext.restoreGraphicsState()
-        }
+        if open > 0.001 { dropdown(cpuPanel, under: cpuRect, crop: 0.5, scale: 1.6, reveal: CGFloat(open)) }
         ripple(at: CGPoint(x: cpuRect.midX, y: cpuRect.midY), t: t, start: cpuClick - 0.05)
         let cA = window(t, cpuClick - 0.8, cpuClick + 1.0, 0.3)
         let arrive = ease(prog(t, cpuClick - 0.8, cpuClick - 0.1))
         cursor(at: CGPoint(x: lerp(1500, cpuRect.midX + 4, arrive), y: lerp(560, cpuRect.midY + 2, arrive)),
                alpha: cA, pressed: abs(t - cpuClick) < 0.12)
         caption("stats", "stats2", t: t, a: s5 + 0.4, b: s6)
+        // Click AI usage → its dropdown (totals by range and by agent).
+        let aiOpen = ease(prog(t, aiClick, aiClick + 0.4)) * (1 - ease(prog(t, s7 - 0.5, s7 - 0.1)))
+        if aiOpen > 0.001 { dropdown(aiPanel, under: aiRect, crop: 0.47, scale: 1.45, reveal: CGFloat(aiOpen)) }
+        ripple(at: CGPoint(x: aiRect.midX, y: aiRect.midY), t: t, start: aiClick - 0.05)
+        let aA = window(t, aiClick - 0.8, aiClick + 1.0, 0.3)
+        let aArrive = ease(prog(t, aiClick - 0.8, aiClick - 0.1))
+        cursor(at: CGPoint(x: lerp(1500, aiRect.midX + 4, aArrive), y: lerp(560, aiRect.midY + 2, aArrive)),
+               alpha: aA, pressed: abs(t - aiClick) < 0.12)
+        caption("ai", "ai2", t: t, a: s6 + 0.4, b: s7)
     }
 
-    // ---- S6: feature cards. --------------------------------------------------------------------
-    if t >= s6, t < s7 + 0.4 {
+    // ---- S7: feature cards. --------------------------------------------------------------------
+    if t >= s7, t < s8 + 0.4 {
         let cards: [(String, String)] = [("magnifyingglass", "search"), ("rectangle.bottomthird.inset.filled", "shelf"),
                                          ("wand.and.stars", "rules"), ("eye.slash", "clean")]
         let cw: CGFloat = 330, ch: CGFloat = 250, gap: CGFloat = 36
@@ -444,7 +467,7 @@ func frame(_ t: Double) {
         for (i, (sym, key)) in cards.enumerated() {
             let a0 = cardTimes[i]
             let p = back(prog(t, a0, a0 + 0.5))
-            let a = prog(t, a0, a0 + 0.3) * (1 - prog(t, s7, s7 + 0.4))
+            let a = prog(t, a0, a0 + 0.3) * (1 - prog(t, s8, s8 + 0.4))
             guard a > 0.001 else { continue }
             let x = (W - total) / 2 + CGFloat(i) * (cw + gap)
             let y: CGFloat = 330 + CGFloat(40 * (1 - p))
@@ -463,11 +486,11 @@ func frame(_ t: Double) {
             drawTinted(img, in: NSRect(x: r.midX - iw / 2, y: r.minY + 62, width: iw, height: ih), color: ink, alpha: a)
             text(S[key] ?? "", size: 27, weight: .semibold, center: CGPoint(x: r.midX, y: r.maxY - 58), alpha: a)
         }
-        caption("all", "all2", t: t, a: s6 + 0.5, b: s7)
+        caption("all", "all2", t: t, a: s7 + 0.5, b: s8)
     }
 
-    // ---- S7: numbers, then the end card. -------------------------------------------------------
-    if t >= s7 {
+    // ---- S8: numbers, then the end card. -------------------------------------------------------
+    if t >= s8 {
         let nums: [(String, String)] = [("0.02%", "idle"), ("~40 MB", "mem"), ("0", "fakes")]
         let fadeNums = 1 - prog(t, endAt - 0.4, endAt)
         for (i, (big, key)) in nums.enumerated() {
@@ -511,10 +534,11 @@ if mode == "cues" {
     cue(collapseAt, "hide"); cue(tap1, "tap", 0); cue(tap2, "tap", 1)
     for (i, p) in itemTimes.enumerated() { cue(p, "item", i) }
     cue(cpuClick, "click")
+    cue(aiItemTime, "item", 3); cue(aiClick, "click")
     for (i, p) in cardTimes.enumerated() { cue(p, "card", i) }
     for (i, p) in numberTimes.enumerated() { cue(p, "number", i) }
     cue(endAt, "end")
-    let json: [String: Any] = ["duration": duration, "scenes": [s1, s2, s3, s4, s5, s6, s7], "cues": cues]
+    let json: [String: Any] = ["duration": duration, "scenes": [s1, s2, s3, s4, s5, s6, s7, s8], "cues": cues]
     FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]))
 } else if let still = Double(mode) {
     render(still)

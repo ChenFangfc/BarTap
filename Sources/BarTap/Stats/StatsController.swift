@@ -10,17 +10,33 @@ final class StatsController: NSObject, NSMenuDelegate {
     private let engine = StatsEngine()
     private var items: [StatsModule: NSStatusItem] = [:]
     private var combinedItem: NSStatusItem?
+    /// When the last stats item was added to the bar (placement checks wait for it to settle).
+    private(set) var itemsCreatedAt = Date.distantPast
+
+    /// Wanted items that don't exist yet (apply() waits for the toggle's position first).
+    var awaitingItems: Bool {
+        let wanted = settings.statsModules
+        return settings.statsCombined ? (combinedItem == nil && !wanted.isEmpty) : wanted.contains { items[$0] == nil }
+    }
     private var openPanels: [StatsModule: StatsPanel] = [:]
     private var openMenus = 0
     private var last: StatsSnapshot?
+    private var aiEngine: AIUsageEngine?
+    let aiPrices = AIPrices()
+    private var aiSnapshot: AIUsageEngine.Snapshot?
+    private var aiDisplay: AIDisplay?
+    private var aiDay = ""
+    private var midnight: DispatchWorkItem?
+    /// Latest values, for previews in Settings.
+    var latest: StatsSnapshot? { last }
     private var observers: [NSObjectProtocol] = []
     private var publicIP: (value: String, at: Date)?
     private var alertTrackers: [AlertKind: AlertTracker] = [:]
     private var notificationsAuthorized = false
-    /// The toggle's preferred-position key, so new stats items land just right of it (Shown).
+    /// The toggle's stored order key, so new stats items land just right of it (Shown).
     var toggleKeyProvider: () -> Double? = { nil }
-    /// The toggle's current distance from the bar's right edge (geometry, not a stored key).
-    var toggleRightDistance: () -> CGFloat? = { nil }
+    /// Used only if no key is stored after waiting: an estimate from the toggle's geometry.
+    var toggleKeyEstimate: () -> Double? = { nil }
     var openSettings: (() -> Void)?
 
     init(settings: Settings) {
@@ -35,15 +51,77 @@ final class StatsController: NSObject, NSMenuDelegate {
     }
 
     var options: StatsRenderer.Options {
-        StatsRenderer.Options(fahrenheit: settings.statsFahrenheit, bits: settings.statsNetworkBits, clockFormat: settings.clockFormat)
+        StatsRenderer.Options(fahrenheit: settings.statsFahrenheit, bits: settings.statsNetworkBits, clockFormat: settings.clockFormat,
+                              aiTags: settings.aiPerAgent ? aiAgentsShown().map(\.tag) : [], aiPlanLeft: settings.aiPlanLeft)
+    }
+
+    /// Agents the AI item counts: the chosen ones (all, if none chosen) that exist on this Mac.
+    func aiAgentsShown() -> [AIAgent] {
+        let detected = aiSnapshot?.detected ?? []
+        let chosen = settings.aiAgents
+        return AIAgent.allCases.filter { detected.contains($0) && (chosen.isEmpty || chosen.contains($0)) }
     }
 
     private var pathMonitor: NWPathMonitor?
     private var lastOnline: Bool?
     private var lastCharged: Bool?
 
-    /// Persist data-usage counters (on quit).
-    func flush() { engine.flush() }
+    /// Persist data-usage counters and AI usage sums (on quit).
+    func flush() {
+        engine.flush()
+        aiEngine?.flush()
+    }
+
+    // MARK: AI usage
+
+    /// The reader runs only while the AI item is on; turning it off frees everything it held.
+    private func configureAI(_ on: Bool) {
+        if on, aiEngine == nil {
+            let e = AIUsageEngine()
+            e.onUpdate = { [weak self] snapshot in self?.aiUpdated(snapshot) }
+            aiEngine = e
+            e.start()
+        } else if !on, let e = aiEngine {
+            e.stop()
+            aiEngine = nil
+            aiSnapshot = nil
+            aiDisplay = nil
+            midnight?.cancel()
+            midnight = nil
+        }
+    }
+
+    private func aiUpdated(_ snapshot: AIUsageEngine.Snapshot) {
+        aiSnapshot = snapshot
+        recomputeAI()
+        if settings.aiPricesOnline, snapshot.progress == nil {
+            aiPrices.refreshIfNeeded(hasUnpriced: aiDisplay?.total.partlyPriced == true) { [weak self] in self?.recomputeAI() }
+        }
+    }
+
+    /// The menu bar summary, recomputed when usage or settings change and at midnight, never
+    /// every second.
+    private func recomputeAI() {
+        let now = Date()
+        aiDay = AIUsageBook.dayKey(now, calendar: .current)
+        guard let s = aiSnapshot else { aiDisplay = nil; return }
+        // Ranges start over at midnight even when nothing new is written.
+        midnight?.cancel()
+        if let next = Calendar.current.nextDate(after: now, matching: DateComponents(hour: 0, minute: 0, second: 5), matchingPolicy: .nextTime) {
+            let work = DispatchWorkItem { [weak self] in self?.recomputeAI() }
+            midnight = work
+            DispatchQueue.main.asyncAfter(wallDeadline: .now() + next.timeIntervalSince(now), execute: work)
+        }
+        aiDisplay = AIDisplay.make(book: s.book, plans: s.plans, agents: aiAgentsShown(), range: settings.aiRange,
+                                   now: now, calendar: .current, prices: { [aiPrices] in aiPrices.price($0) })
+        last?.ai = aiDisplay
+        last?.aiDetail = aiSnapshot
+        render()
+        for (_, panel) in openPanels { if let s = last { panel.update(s, options) } }
+    }
+
+    /// Settings › Stats › Read history again.
+    func rereadAIHistory() { aiEngine?.reset() }
 
     // MARK: Configuration
 
@@ -54,24 +132,22 @@ final class StatsController: NSObject, NSMenuDelegate {
         let wanted = settings.statsModules
         // New items are placed relative to the toggle. Right after launch the toggle may not be
         // laid out yet; wait for it (briefly) rather than dropping items into the Hidden section.
-        let needsNewItems = settings.statsCombined ? (combinedItem == nil && !wanted.isEmpty) : wanted.contains { items[$0] == nil }
-        if needsNewItems && toggleKeyProvider() == nil && anchorRetries < 20 {
-            anchorRetries += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.apply() }
-            return
+        var anchor = toggleKeyProvider()
+        if awaitingItems && anchor == nil {
+            if anchorRetries < 40 {
+                anchorRetries += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.apply() }
+                return
+            }
+            anchor = toggleKeyEstimate()
         }
         anchorRetries = 0
-        // One anchor for the whole batch: inserting the first item shifts the toggle, so asking
-        // again per item would place later items somewhere else.
-        let anchor = toggleKeyProvider()
         let combined = settings.statsCombined && !wanted.isEmpty
-        var created: [String] = []
         if combined {
             for (_, item) in items { NSStatusBar.system.removeStatusItem(item) }
             items.removeAll()
             if combinedItem == nil {
-                combinedItem = makeItem(name: "tb_stats_combined", order: 0, anchor: anchor)
-                created.append("combined")
+                combinedItem = makeItem(name: "tb_stats_combined", left: anchor, right: nil)
             }
         } else {
             if let c = combinedItem { NSStatusBar.system.removeStatusItem(c); combinedItem = nil }
@@ -79,9 +155,22 @@ final class StatsController: NSObject, NSMenuDelegate {
                 NSStatusBar.system.removeStatusItem(item)
                 items[m] = nil
             }
+            // The stored keys must run strictly downwards from the toggle's in the configured
+            // order (larger = further left). If they don't (the user reordered, or a key is gone),
+            // start over: remove everything first, since removing an item deletes its key.
+            let existing = wanted.filter { items[$0] != nil }
+            if let anchor, !existing.isEmpty {
+                let keys = existing.map { storedKey("tb_stats_\($0.rawValue)") }
+                let chain = [anchor] + keys.compactMap { $0 }
+                if keys.contains(where: { $0 == nil }) || !zip(chain, chain.dropFirst()).allSatisfy({ $0 > $1 }) {
+                    removeItemsForReplacement()
+                }
+            }
+            // New items get a key between their neighbours', so the order holds.
             for (i, m) in wanted.enumerated() where items[m] == nil {
-                items[m] = makeItem(name: "tb_stats_\(m.rawValue)", order: i, anchor: anchor)
-                created.append(m.rawValue)
+                let left = i == 0 ? anchor : storedKey("tb_stats_\(wanted[i - 1].rawValue)") ?? anchor
+                let right = wanted[(i + 1)...].lazy.compactMap { [self] n in items[n] != nil ? storedKey("tb_stats_\(n.rawValue)") : nil }.first
+                items[m] = makeItem(name: "tb_stats_\(m.rawValue)", left: left, right: right)
             }
         }
         var needed = Set(wanted)
@@ -93,52 +182,12 @@ final class StatsController: NSObject, NSMenuDelegate {
         if a.batteryEnabled || a.chargedEnabled { needed.insert(.battery) }
         if a.anyEnabled { requestNotificationPermission() }
         configureNetworkAlert(a.networkEnabled)
+        configureAI(wanted.contains(.ai))
+        if aiSnapshot != nil { recomputeAI() }
+        needed.remove(.ai)   // not sampled by the stats engine
         engine.configure(modules: needed, interval: settings.statsInterval)
         invalidateDrawn()   // items may be new: draw everything once
         render()
-        if !created.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.verifyPlacement(created, attempt: 0) }
-        }
-    }
-
-    /// Distance of an item's right edge from the bar's right edge, from its proxy window.
-    private func rightDistance(_ item: NSStatusItem) -> CGFloat? {
-        guard let f = item.button?.window?.frame, f.width > 0,
-              let s = NSScreen.screens.first(where: { NSPointInRect(NSPoint(x: f.maxX - 0.5, y: f.maxY - 0.5), $0.frame) }) else { return nil }
-        return s.frame.maxX - f.maxX
-    }
-
-    private(set) var placementFixes = 0
-
-    /// Newly created items must land right of the toggle (Shown). macOS orders items by stored
-    /// keys whose relation to an un-keyed toggle is not documented, so check where they actually
-    /// went and re-create any that ended up on the toggle's left, anchored to its real position.
-    private func verifyPlacement(_ names: [String], attempt: Int) {
-        guard attempt < 2, let toggleRD = toggleRightDistance() else { return }
-        var misplaced: [(name: String, index: Int)] = []
-        for (i, name) in names.enumerated() {
-            let item = name == "combined" ? combinedItem : StatsModule(rawValue: name).flatMap { items[$0] }
-            guard let item, let rd = rightDistance(item) else { continue }
-            if rd >= toggleRD - 0.5 { misplaced.append((name, i)) }
-        }
-        guard !misplaced.isEmpty else { return }
-        placementFixes += 1
-        for (name, i) in misplaced {
-            let key = "NSStatusItem Preferred Position tb_stats_\(name)"
-            // Strictly smaller than the toggle's position; a little further right on the retry.
-            UserDefaults.standard.set(max(0, Double(toggleRD) - (attempt == 0 ? 0.5 : 4) - Double(i) * 0.05), forKey: key)
-            if name == "combined" {
-                if let c = combinedItem { NSStatusBar.system.removeStatusItem(c) }
-                combinedItem = makeItem(name: "tb_stats_combined", order: i, anchor: nil)
-            } else if let m = StatsModule(rawValue: name) {
-                if let old = items[m] { NSStatusBar.system.removeStatusItem(old) }
-                items[m] = makeItem(name: "tb_stats_\(name)", order: i, anchor: nil)
-            }
-        }
-        invalidateDrawn()
-        render()
-        let names = misplaced.map(\.name)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.verifyPlacement(names, attempt: attempt + 1) }
     }
 
     /// Width the stats items occupy right of the toggle (including macOS's per-item padding).
@@ -148,7 +197,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         let o = StatsRenderer.Options(fahrenheit: settings.statsFahrenheit, bits: settings.statsNetworkBits)
         let modules = settings.statsModules
         guard !modules.isEmpty else { return 0 }
-        let widths = modules.map { StatsRenderer.width($0, settings.statsMode($0), o) }
+        let widths = modules.map { StatsRenderer.width($0, settings.statsElements($0), o) }
         if settings.statsCombined { return widths.reduce(0, +) + 6 * CGFloat(modules.count - 1) + 16 }
         return widths.reduce(0) { $0 + $1 + 16 }
     }
@@ -169,13 +218,23 @@ final class StatsController: NSObject, NSMenuDelegate {
         drawn.removeAll()
     }
 
-    private func makeItem(name: String, order: Int, anchor: Double?) -> NSStatusItem {
+    private func storedKey(_ name: String) -> Double? {
+        UserDefaults.standard.object(forKey: "NSStatusItem Preferred Position \(name)") as? Double
+    }
+
+    /// macOS lays the bar out by stored keys (larger = further left), so a key just below the
+    /// toggle's puts the item right of the toggle (Shown): between `left` (the toggle or the
+    /// previous stats item) and `right` (the next one, if any). The proxy frames are not trusted
+    /// for this: right after launch they can be stale or even swapped.
+    /// Note: removing a status item also deletes its stored key; set keys after removing.
+    private func makeItem(name: String, left: Double?, right: Double?) -> NSStatusItem {
         let key = "NSStatusItem Preferred Position \(name)"
-        if UserDefaults.standard.object(forKey: key) == nil, let toggle = anchor {
-            // Lower key = further right; stay between the toggle and its right neighbour.
-            UserDefaults.standard.set(max(0, toggle - 0.5 - Double(order) * 0.05), forKey: key)
+        if UserDefaults.standard.object(forKey: key) == nil, let left {
+            let value = right.map { (left + $0) / 2 } ?? (left - min(0.05, left / 4))
+            UserDefaults.standard.set(value, forKey: key)
         }
         let item = NSStatusBar.system.statusItem(withLength: 30)
+        itemsCreatedAt = Date()
         item.autosaveName = name
         item.behavior = []
         let menu = NSMenu()
@@ -191,7 +250,11 @@ final class StatsController: NSObject, NSMenuDelegate {
     private(set) var renders = 0
 
     private func received(_ s: StatsSnapshot) {
+        var s = s
+        s.ai = aiDisplay
+        s.aiDetail = aiSnapshot
         last = s
+        if aiSnapshot != nil, AIUsageBook.dayKey(Date(), calendar: .current) != aiDay { recomputeAI() }
         let started = CFAbsoluteTimeGetCurrent()
         render()
         renderSeconds += CFAbsoluteTimeGetCurrent() - started
@@ -210,34 +273,35 @@ final class StatsController: NSObject, NSMenuDelegate {
         let now = Date()
         let optionKey = "\(o.fahrenheit)|\(o.bits)"
         for (m, item) in items {
-            let mode = settings.statsMode(m)
-            let width = StatsRenderer.width(m, mode, o)
+            let elements = settings.statsElements(m)
+            let width = StatsRenderer.width(m, elements, o)
             if abs(item.length - width) > 0.5 { item.length = width }
-            let sig = StatsRenderer.signature(m, mode, last, o, now: now) + optionKey
+            let sig = StatsRenderer.signature(m, elements, last, o, now: now) + optionKey
             guard drawn[m.rawValue] != sig else { skippedUpdates += 1; continue }
             drawn[m.rawValue] = sig
             performedUpdates += 1
-            item.button?.image = StatsRenderer.image(m, mode, last, o, now: now)
-            item.button?.setAccessibilityLabel(StatsRenderer.accessibilityText(m, last, o, now: now))
+            item.button?.image = StatsRenderer.image(m, elements, last, o, now: now)
+            let label = StatsRenderer.accessibilityText(m, last, o, now: now)
+            if item.button?.accessibilityLabel() != label { item.button?.setAccessibilityLabel(label) }
         }
         if let item = combinedItem {
-            let parts = settings.statsModules.map { (m: $0, mode: settings.statsMode($0)) }
+            let parts = settings.statsModules.map { (m: $0, elements: settings.statsElements($0)) }
             let gap: CGFloat = 6
-            let width = max(parts.reduce(0) { $0 + StatsRenderer.width($1.m, $1.mode, o) } + gap * CGFloat(max(parts.count - 1, 0)), 10)
+            let width = max(parts.reduce(0) { $0 + StatsRenderer.width($1.m, $1.elements, o) } + gap * CGFloat(max(parts.count - 1, 0)), 10)
             if abs(item.length - width) > 0.5 { item.length = width }
-            let sig = parts.map { StatsRenderer.signature($0.m, $0.mode, last, o, now: now) }.joined(separator: "#") + optionKey
+            let sig = parts.map { StatsRenderer.signature($0.m, $0.elements, last, o, now: now) }.joined(separator: "#") + optionKey
             guard drawn["combined"] != sig else { skippedUpdates += 1; return }
             drawn["combined"] = sig
             let snapshot = last
             item.button?.image = StatsRenderer.bitmap(width: width) { _ in
                 var x: CGFloat = 0
                 for p in parts {
-                    let w = StatsRenderer.width(p.m, p.mode, o)
+                    let w = StatsRenderer.width(p.m, p.elements, o)
                     NSGraphicsContext.saveGraphicsState()
                     let shift = NSAffineTransform()
                     shift.translateX(by: x, yBy: 0)
                     shift.concat()
-                    StatsRenderer.drawContent(p.m, p.mode, snapshot, o, NSRect(x: 0, y: 0, width: w, height: StatsRenderer.height), now: now)
+                    StatsRenderer.drawContent(p.m, p.elements, snapshot, o, NSRect(x: 0, y: 0, width: w, height: StatsRenderer.height), now: now)
                     NSGraphicsContext.restoreGraphicsState()
                     x += w + gap
                 }
@@ -299,6 +363,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .sensors: return L("Sensors")
         case .battery: return L("Battery")
         case .time: return L("Time")
+        case .ai: return L("AI usage")
         }
     }
 
@@ -323,6 +388,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .sensors: return SensorsPanel()
         case .battery: return BatteryPanel()
         case .time: return TimePanel(worldClocks: settings.worldClocks)
+        case .ai: return AIPanel(settings: settings, prices: aiPrices, agents: aiAgentsShown())
         }
     }
 
@@ -504,7 +570,16 @@ final class StatsController: NSObject, NSMenuDelegate {
             "volumes": last?.volumes.map(\.name) ?? [],
             "battery": last?.battery?.percent ?? -1,
             "openPanels": openPanels.count,
-            "placementFixes": placementFixes,
+            "ai": [
+                "running": aiEngine != nil,
+                "detected": (aiSnapshot?.detected ?? []).map(\.rawValue).sorted(),
+                "progress": aiSnapshot?.progress ?? -1,
+                "todayTokens": aiDisplay?.total.tokens ?? -1,
+                "todayCost": aiDisplay?.total.cost ?? -1,
+                "days": aiSnapshot?.book.days.count ?? 0,
+                "plans": (aiSnapshot?.plans.keys.map(\.rawValue) ?? []).sorted(),
+                "pricesFetched": aiPrices.fetched,
+            ] as [String: Any],
             "renderMs": renderSeconds * 1000,
             "skippedUpdates": skippedUpdates,
             "performedUpdates": performedUpdates,

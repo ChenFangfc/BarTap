@@ -169,13 +169,15 @@ C_MAJOR_PENT = [60, 62, 64, 67, 69]
 
 
 def plan(sc):
-    """(start, chord, pulse?) — S1 calm, S2 uneasy, S3 resolves, S4-S7 a light I-V-vi-IV pulse."""
-    s1, s2, s3, s4, s5, s6, s7 = sc
+    """(start, chord, pulse?) — S1 calm, S2 uneasy, S3 resolves, then a light I-V-vi-IV pulse that
+    resolves on the last scene (the numbers and the end card)."""
+    s1, s2, s3, s4, last = sc[0], sc[1], sc[2], sc[3], sc[-1]
     bar = 4 * BEAT
     p = [(s1, "Am7", False), (s2, "Dm7b5", False), (s3, "Cmaj9", False)]
-    for i, ch in enumerate(["C", "G/B", "Am7", "Fmaj7", "C/E", "F"]):
-        p.append((s4 + i * bar, ch, True))
-    p += [(s7, "Gsus", True), (s7 + bar / 2, "G", True), (s7 + bar, "C", False)]
+    pulse = ["C", "G/B", "Am7", "Fmaj7", "C/E", "F", "Am7", "Fmaj7"]
+    for i in range(round((last - s4) / bar)):
+        p.append((s4 + i * bar, pulse[i % len(pulse)], True))
+    p += [(last, "Gsus", True), (last + bar / 2, "G", True), (last + bar, "C", False)]
     return p
 
 

@@ -2,6 +2,11 @@ import AppKit
 import BarTapCore
 
 /// What the settings UI needs from the app.
+extension Notification.Name {
+    /// Posted when Accessibility access is granted while BarTap runs.
+    static let barTapTrustChanged = Notification.Name("BarTapTrustChanged")
+}
+
 protocol SettingsHost: AnyObject {
     var settings: Settings { get }
     var hotkeyFailures: Set<HotkeyAction> { get }
@@ -12,6 +17,9 @@ protocol SettingsHost: AnyObject {
     func revealEverything()
     func catalogSnapshot(_ completion: @escaping ([BarItem]) -> Void)
     func requestAccessibility()
+    func resetAccessibility()
+    func statsSnapshot() -> StatsSnapshot?
+    func rereadAIHistory()
     func pickColor()
     func restartMenuBarHost()
     func reopenSettings()
@@ -60,12 +68,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             tabs.addTabViewItem(item)
         }
         window.contentViewController = tabs
+        // Permission state can change in System Settings while this window is open.
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshForms), name: .barTapTrustChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshForms), name: NSApplication.didBecomeActiveNotification, object: nil)
         window.setContentSize(NSSize(width: 640, height: 560))
         window.center()
         Self.liveCount += 1
     }
 
     deinit { Self.liveCount -= 1 }
+
+    @objc private func refreshForms() { forms.forEach { $0.refresh() } }
+
+    private var elementEditor: StatsElementEditor?
+
+    private func openElementEditor(_ m: StatsModule) {
+        guard let host, let window, elementEditor == nil else { return }
+        let editor = StatsElementEditor(module: m, settings: host.settings, liveSnapshot: { [weak host] in host?.statsSnapshot() })
+        editor.onClose = { [weak self] in self?.elementEditor = nil }
+        elementEditor = editor
+        if let sheet = editor.window { window.beginSheet(sheet) }
+    }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -264,55 +287,36 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func buildStats(_ f: Form) {
         f.section(L("Menu bar stats"))
         f.note(L("Lightweight system monitor: one process, no background daemon, no root helper. Details and process lists are sampled only while a dropdown is open."))
-        let names: [(StatsModule, String)] = [
-            (.cpu, L("CPU")), (.gpu, "GPU"), (.memory, L("Memory")), (.disk, L("Disk")),
-            (.network, L("Network")), (.sensors, L("Sensors")), (.battery, L("Battery")), (.time, L("Time")),
-        ]
-        let modeNames: [StatsMode: String] = [
-            .percent: L("Percentage"), .graph: L("Graph"), .graphPercent: L("Graph + percentage"), .cores: L("Per-core bars"),
-            .pie: L("Pie"), .piePercent: L("Pie + percentage"), .usedAmount: L("Used amount"), .freeAmount: L("Free space"),
-            .activity: L("Read / write"), .rates: L("Upload / download"), .cpuTemperature: L("CPU temperature"),
-            .temperatureAndFan: L("Temperature + fan"), .power: L("Power (W)"), .iconPercent: L("Icon + percentage"),
-            .timeRemaining: L("Time remaining"), .clock: L("Clock"),
-        ]
-        for (module, name) in names {
-            let check = NSButton(checkboxWithTitle: name, target: nil, action: nil)
-            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-            popup.translatesAutoresizingMaskIntoConstraints = false
-            popup.widthAnchor.constraint(equalToConstant: 190).isActive = true
-            for mode in module.modes { popup.addItem(withTitle: modeNames[mode] ?? mode.rawValue) }
-            let sync = { [weak self] in
-                guard let s = self?.host?.settings else { return }
-                check.state = s.statsModules.contains(module) ? .on : .off
-                popup.selectItem(at: module.modes.firstIndex(of: s.statsMode(module)) ?? 0)
-                popup.isEnabled = check.state == .on
-            }
-            let toggleTarget = ClosureTarget { [weak self] _ in
-                guard let s = self?.host?.settings else { return }
-                var list = s.statsModules
-                if check.state == .on { if !list.contains(module) { list.append(module) } } else { list.removeAll { $0 == module } }
-                // Keep a stable, sensible order.
-                s.statsModules = StatsModule.allCases.filter { list.contains($0) }
-                sync()
-            }
-            let popupTarget = ClosureTarget { [weak self] _ in
-                guard let s = self?.host?.settings, popup.indexOfSelectedItem >= 0 else { return }
-                s.setStatsMode(module, module.modes[popup.indexOfSelectedItem])
-            }
-            check.target = toggleTarget
-            check.action = #selector(ClosureTarget.fire(_:))
-            popup.target = popupTarget
-            popup.action = #selector(ClosureTarget.fire(_:))
-            retained.append(contentsOf: [toggleTarget, popupTarget])
-            check.translatesAutoresizingMaskIntoConstraints = false
-            check.widthAnchor.constraint(equalToConstant: 160).isActive = true
-            let row = NSStackView(views: [check, popup])
-            row.spacing = 10
-            f.custom(nil, row)
-            sync()
-        }
+        f.note(L("Pick a layout for each item, or Customize… to combine elements like iStat Menus. Top to bottom is left to right in the menu bar."))
+        let modules = StatsModulesView(settings: s, liveSnapshot: { [weak self] in self?.host?.statsSnapshot() },
+                                       openEditor: { [weak self] m in self?.openElementEditor(m) })
+        f.custom(nil, modules)
         f.toggle(L("Combine into a single menu bar item"), help: L("Saves space beside the notch; each metric gets its own submenu."),
                  get: { [unowned self] in s.statsCombined }, set: { [unowned self] in s.statsCombined = $0 })
+
+        f.section(L("AI usage"))
+        let detected = AISources.detected()
+        if detected.isEmpty {
+            f.note(L("No supported coding agent found on this Mac yet (Claude Code, Codex, Gemini CLI, OpenCode, Kilo Code, Qwen Code, Kimi Code)."))
+        }
+        f.popup(L("Time range"), options: AIRange.allCases.map { ($0.rawValue, AIPanel.rangeName($0)) },
+                get: { [unowned self] in s.aiRange.rawValue }, set: { [unowned self] in s.aiRange = AIRange(rawValue: $0) ?? .today })
+        for agent in AIAgent.allCases where detected.contains(agent) {
+            f.toggle(L("Count %@", agent.displayName), get: { [unowned self] in s.aiAgents.isEmpty || s.aiAgents.contains(agent) },
+                     set: { [unowned self] on in
+                         var chosen = s.aiAgents.isEmpty ? detected : s.aiAgents
+                         if on { chosen.insert(agent) } else { chosen.remove(agent) }
+                         s.aiAgents = chosen == detected ? [] : chosen
+                     })
+        }
+        f.toggle(L("One segment per agent"), help: L("Each agent's numbers side by side in the menu bar, tagged CC, CX, GM…"),
+                 get: { [unowned self] in s.aiPerAgent }, set: { [unowned self] in s.aiPerAgent = $0 })
+        f.popup(L("Plan limits"), options: [("used", L("Show what's used")), ("left", L("Show what's left"))],
+                get: { [unowned self] in s.aiPlanLeft ? "left" : "used" }, set: { [unowned self] in s.aiPlanLeft = $0 == "left" })
+        f.toggle(L("Update model prices weekly"), help: L("Downloads LiteLLM's public price list from GitHub, only while AI usage is on."),
+                 get: { [unowned self] in s.aiPricesOnline }, set: { [unowned self] in s.aiPricesOnline = $0 })
+        f.note(L("Read from the agents' own logs on this Mac; nothing is uploaded. Cost is what the tokens would cost at API prices. Plan limits come from Claude Code's and Codex's own records."))
+        f.button(L("Read History Again")) { [weak self] in self?.host?.rereadAIHistory() }
 
         f.section(L("Options"))
         f.slider(L("Update every"), min: 1, max: 10, step: 1,
@@ -422,7 +426,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             AXCatalog.isTrusted ? L("Accessibility: granted — search, shelf and per-icon features are available.")
                                 : L("Accessibility: not granted — hiding works fully; search, shelf and layout lists need it.")
         }
-        f.button(L("Grant Accessibility Access…")) { [weak self] in self?.host?.requestAccessibility() }
+        f.buttons([(L("Grant Accessibility Access…"), { [weak self] in self?.host?.requestAccessibility() }),
+                   (L("Reset and Ask Again"), { [weak self] in self?.host?.resetAccessibility() })])
+        f.note(L("Already switched on in System Settings, but still not granted? macOS is holding the permission for an earlier build of BarTap. Click Reset and Ask Again, then switch BarTap on once more."))
+        f.note("") {
+            ItemImages.permitted ? L("Screen Recording: granted — the shelf shows each icon as it looks in the menu bar.")
+                                 : L("Screen Recording: not granted — optional; the shelf shows app icons instead of the real ones.")
+        }
+        f.button(L("Allow Screen Recording…")) { ItemImages.request() }
         f.section(L("Resource usage"))
         f.note("") {
             L("Memory %.1f MB · CPU time %.2f s since launch", ProcessStats.memoryMB(), ProcessStats.cpuSeconds())

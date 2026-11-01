@@ -8,7 +8,12 @@ Leaves BarTap quit and its debug flags removed when done.
 import json, os, pathlib, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-APP = ROOT / "dist/BarTap.app"
+# The installed copy (scripts/build.sh --install), else a build in dist/. Never both: with two
+# copies of one bundle ID, bartap:// commands can launch the other copy as a second instance.
+INSTALLED = pathlib.Path("/Applications/BarTap.app")
+APP = INSTALLED if INSTALLED.exists() else ROOT / "dist/BarTap.app"
+if INSTALLED.exists() and (ROOT / "dist/BarTap.app").exists():
+    sys.exit("Both /Applications/BarTap.app and dist/BarTap.app exist; use scripts/build.sh --install first.")
 PROBE = ROOT / ".build/debug/BarTapProbe"
 STATE = pathlib.Path.home() / "Library/Application Support/BarTap/debug-state.json"
 DOMAIN = "io.github.chenfangfc.BarTap"
@@ -55,6 +60,24 @@ def probe():
     return json.loads(sh(str(PROBE)))["screens"]
 
 
+def wait_until(predicate, timeout, step=0.5):
+    """Polls until predicate() is true."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(step)
+    return predicate()
+
+
+def wait_for_placement(timeout=20):
+    """A (re)placement settles once stats items are back and any correction round is done."""
+    time.sleep(1.0)
+    settled = wait_until(lambda: not state().get("placementSettling", False), timeout)
+    check(settled, "placement settles")
+    time.sleep(0.5)
+
+
 def check(cond, msg):
     global passed, failed
     if cond:
@@ -77,6 +100,8 @@ def launch(fresh=False, wait=3.0):
             break
         time.sleep(0.05)
     time.sleep(wait)
+    running = sh("pgrep", "-x", "BarTap", check=False).split()
+    check(len(running) == 1, f"exactly one BarTap running (found {len(running)})")
 
 
 def quit_app():
@@ -129,7 +154,8 @@ def scenario_first_run():
     print("• first run: placement + start collapsed")
     quit_app()
     before = by_name(probe())
-    launch(fresh=True, wait=3.5)
+    launch(fresh=True, wait=1.0)
+    wait_for_placement()
     st, after = state(), probe()
     print(f"    before: {summary(before.values())}")
     print(f"    after:  {summary(after)}")
@@ -298,7 +324,8 @@ def scenario_bad_layout():
     check(all(s["separators"] == 0 for s in now), "nothing collapsed while order is wrong")
     cmd("hide"); time.sleep(0.8)
     check(all(s["separators"] == 0 for s in probe()), "refuses to collapse on request")
-    cmd("reset-positions"); time.sleep(4.0)
+    cmd("reset-positions")
+    wait_for_placement()
     st = state()
     check(st["layoutProblem"] == "", f'after reset: {st["layoutProblem"]!r}')
     cmd("hide"); time.sleep(1.0)
@@ -552,7 +579,8 @@ def scenario_reset_with_stats():
     stats_on(["cpu", "memory", "network"])
     time.sleep(3)
     before = state()["resetCount"]
-    cmd("reset-positions"); time.sleep(5)
+    cmd("reset-positions")
+    wait_for_placement()
     cmd("hide"); time.sleep(1.5)
     st = state()
     check(st["resetCount"] == before + 1, f'exactly one reset ({before} → {st["resetCount"]})')
@@ -570,7 +598,8 @@ def scenario_first_run_with_stats():
     sh("defaults", "delete", DOMAIN, check=False)
     sh("defaults", "write", DOMAIN, "stats.modules", "-array", "cpu", "memory", "disk", "network")
     before = by_name(probe())
-    launch(wait=5.0)
+    launch(wait=1.0)
+    wait_for_placement()
     st, after = state(), probe()
     print(f"    before: {summary(before.values())}")
     print(f"    after:  {summary(after)}  (placement fixes: {st['stats'].get('placementFixes', 0)})")
@@ -610,6 +639,33 @@ def scenario_time_module():
     check(b - a <= 1, f"clock redrew {b - a} times in 10 s (once per minute expected)")
 
 
+def scenario_ai_usage():
+    print("• AI usage: first read, menu bar item, dropdown, CPU, and off releases the reader")
+    stats_on(["ai"])
+    deadline = time.time() + 90
+    ai = {}
+    while time.time() < deadline:
+        time.sleep(2)
+        ai = state()["stats"].get("ai", {})
+        if ai.get("days", 0) > 0 and ai.get("progress", 0) == -1:
+            break
+    print(f'    detected {ai.get("detected")}, {ai.get("days")} days, today {ai.get("todayTokens")} tokens / ${ai.get("todayCost", 0):.2f}, plans {ai.get("plans")}, prices {ai.get("pricesFetched")}')
+    check(ai.get("running") and ai.get("days", 0) > 0, f"AI reader ran: {ai}")
+    st = state()["stats"]
+    check(st["items"] == ["ai"] and st["widths"].get("ai", 0) > 20, f'AI item {st["items"]} {st["widths"]}')
+    cmd("debug/stats-open-ai"); time.sleep(1.0)
+    check(state()["stats"]["openPanels"] == 1, "AI dropdown opens")
+    time.sleep(3.5)
+    p = pid()
+    t0 = proc_cpu_seconds(p); time.sleep(30); used = proc_cpu_seconds(p) - t0
+    print(f"    AI item alone: {used * 1000:.0f} ms / 30 s = {used / 30 * 100:.2f}% CPU, {state()['memoryMB']:.1f} MB")
+    check(used / 30 < 0.02, f"AI item CPU {used / 30 * 100:.2f}% ≥ 2%")
+    sh("defaults", "delete", DOMAIN, "stats.modules", check=False)
+    cmd("debug/reload"); time.sleep(2)
+    ai = state()["stats"].get("ai", {})
+    check(not ai.get("running"), "turning AI usage off stops the reader")
+
+
 SCENARIOS = {
     "first_run": scenario_first_run,
     "show_hide": scenario_show_hide,
@@ -635,6 +691,7 @@ SCENARIOS = {
     "first_run_stats": scenario_first_run_with_stats,
     "jitter": scenario_jitter,
     "time": scenario_time_module,
+    "ai": scenario_ai_usage,
 }
 
 if __name__ == "__main__":
