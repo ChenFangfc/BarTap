@@ -31,12 +31,15 @@ FILM_LANG=$LANG_CODE .build/film "$PWD" \
       -c:a aac -b:a 160k -shortest -movflags +faststart "$OUT"
 echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
 
-# 4. Silent animated preview for the README (960 px, 15 fps).
+# 4. Silent animated preview for the README: the compositor's own frames at full size and 15 fps,
+#    lossless. Lossy WebP re-encodes only the changed region of each frame and leaves visible
+#    blotches on these flat colors; downscaling adds soft edges that compress worse than 1920 px.
 if command -v img2webp >/dev/null; then
   FRAMES=promo/out/preview-frames$SUFFIX
   rm -rf "$FRAMES" && mkdir -p "$FRAMES"
-  ffmpeg -y -loglevel error -i "$OUT" -vf "fps=15,scale=960:-2:flags=lanczos" "$FRAMES/f%04d.png"
-  img2webp -loop 0 -lossy -q 72 -m 6 -d 67 "$FRAMES"/f*.png -o "promo/out/bartap-preview$SUFFIX.webp" >/dev/null
+  FILM_LANG=$LANG_CODE .build/film "$PWD" \
+    | ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s 1920x1080 -r 30 -i - -vf fps=15 "$FRAMES/f%04d.png"
+  img2webp -loop 0 -lossless -m 4 -d 67 "$FRAMES"/f*.png -o "promo/out/bartap-preview$SUFFIX.webp" >/dev/null 2>&1
   rm -rf "$FRAMES"
   echo "wrote promo/out/bartap-preview$SUFFIX.webp ($(du -h promo/out/bartap-preview$SUFFIX.webp | cut -f1))"
   cp "promo/out/bartap-preview$SUFFIX.webp" docs/media/
