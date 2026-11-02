@@ -234,7 +234,7 @@ public enum SensorClassifier {
 // MARK: Modules & settings
 
 public enum StatsModule: String, CaseIterable {
-    case cpu, gpu, memory, disk, network, sensors, battery, time, ai
+    case cpu, gpu, memory, disk, network, sensors, battery, time, ai, volume, bluetooth, trio
 
     /// Elements this module can show, in the order the editor lists them.
     public var elements: [StatsElement] {
@@ -245,9 +245,12 @@ public enum StatsModule: String, CaseIterable {
         case .disk: return [.label, .graph, .bar, .pie, .ring, .percent, .usedFree, .used, .free, .readWrite]
         case .network: return [.label, .graph, .rates]
         case .sensors: return [.label, .temperature, .fan, .tempFan, .power]
-        case .battery: return [.label, .battery, .percent, .timeLeft]
+        case .battery: return [.label, .battery, .percent, .timeLeft, .batteryPower]
         case .time: return [.clock]
         case .ai: return [.label, .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits]
+        case .volume: return [.label, .speaker, .percent, .levelMeter]
+        case .bluetooth: return [.label, .bluetoothIcon, .lowestBattery, .airPods]
+        case .trio: return [.trio, .percent]
         }
     }
 
@@ -260,10 +263,13 @@ public enum StatsModule: String, CaseIterable {
         case .disk: return [[.pie, .percent], [.readWrite], [.pie, .readWrite], [.usedFree], [.free], [.pie], [.percent], [.graph, .readWrite], [.label, .percent]]
         case .network: return [[.rates], [.graph], [.graph, .rates], [.label, .rates]]
         case .sensors: return [[.temperature], [.tempFan], [.temperature, .fan], [.power], [.label, .temperature]]
-        case .battery: return [[.battery, .percent], [.percent], [.timeLeft], [.battery], [.battery, .timeLeft]]
+        case .battery: return [[.battery, .percent], [.percent], [.timeLeft], [.battery], [.battery, .timeLeft], [.battery, .batteryPower], [.batteryPower]]
         case .time: return [[.clock]]
         case .ai: return [[.aiTokensCost], [.aiCost], [.label, .aiTokens], [.aiPlan, .aiPlanPercent], [.aiPlanTwo], [.label, .aiTokensCost],
                           [.aiCredits], [.aiPlanTwo, .aiCredits]]
+        case .volume: return [[.speaker, .percent], [.speaker], [.percent], [.speaker, .levelMeter], [.levelMeter], [.label, .percent]]
+        case .bluetooth: return [[.bluetoothIcon], [.bluetoothIcon, .lowestBattery], [.lowestBattery], [.airPods], [.bluetoothIcon, .airPods], [.label, .lowestBattery]]
+        case .trio: return [[.trio], [.trio, .percent]]
         }
     }
 
@@ -304,6 +310,13 @@ public enum StatsElement: String, CaseIterable {
     case aiPlanPercent // 43%
     case aiPlanTwo    // two lines: 5h 43% / 7d 61%
     case aiCredits    // ring + $2.2K: usage credits used (or left) of the monthly limit
+    case batteryPower // +23 W charging / −8.4 W discharging
+    case speaker      // speaker glyph: waves follow the volume, a slash when muted
+    case levelMeter   // rising bars filled to the volume level
+    case bluetoothIcon // Bluetooth glyph with the number of connected devices
+    case lowestBattery // battery glyph + % of the connected device closest to empty
+    case airPods      // two lines: L 80% / R 75% (earbuds)
+    case trio         // one glyph: Wi-Fi signal and volume above the battery level
 
     /// The single display mode of BarTap 1.0, as elements.
     public static func fromLegacyMode(_ mode: String) -> [StatsElement]? {

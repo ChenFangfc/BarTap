@@ -527,23 +527,35 @@ final class SensorsPanel: StatsPanel {
 
 final class BatteryPanel: StatsPanel {
     private var big: NSTextField!
+    private let flow = PowerFlowView()
+    private var energy: [(NSTextField, NSTextField)] = []
+    private var devices: [(NSTextField, NSTextField)] = []
 
     override init() {
         super.init()
         big = header(L("Battery"))
         row(L("Status"), key: "state")
         row(L("Time remaining"), key: "time")
+        section(L("Power flow"))
+        flow.translatesAutoresizingMaskIntoConstraints = false
+        flow.widthAnchor.constraint(equalToConstant: Self.width - 28).isActive = true
+        flow.heightAnchor.constraint(equalToConstant: 64).isActive = true
+        stack.addArrangedSubview(flow)
+        row(L("Battery power"), key: "power")
+        row(L("Power adapter"), key: "adapter")
+        row(L("Display backlight"), key: "display")
+        section(L("Battery health"))
         row(L("Health"), key: "health")
         row(L("Cycle count"), key: "cycles")
         row(L("Temperature"), key: "temp")
-        row(L("Power"), key: "power")
-        row(L("Power adapter"), key: "adapter")
+        section(L("Energy by app"))
+        energy = dynamicRows(5, prefix: "e")
+        // Measured only while this dropdown is open: keep the rows (compact() runs at open).
+        for (i, row) in energy.enumerated() { row.0.stringValue = i == 0 ? L("Measuring…") : " " }
         section(L("Devices"))
         devices = dynamicRows(4, prefix: "d")
         finishLayout()
     }
-
-    private var devices: [(NSTextField, NSTextField)] = []
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -555,14 +567,36 @@ final class BatteryPanel: StatsPanel {
         set("health", b.healthPercent.map { "\($0)%" + (b.condition.map { " · \($0)" } ?? "") } ?? (b.condition ?? "–"))
         set("cycles", b.cycles.map(String.init) ?? "–")
         set("temp", b.temperature.map { StatFormat.temperature($0, fahrenheit: o.fahrenheit) } ?? "–")
-        if let v = b.voltage, let a = b.amperage {
-            set("power", String(format: "%.1f W (%.2f V, %.2f A)", v * a, v, a))
+        flow.batteryPercent = b.percent
+        flow.charging = b.charging
+        if let f = s.power { flow.flow = f }
+        // Battery power: the flow's (SMC) figure, with the gauge's voltage and current beside it.
+        let watts = s.power?.battery ?? b.voltage.flatMap { v in b.amperage.map { v * $0 } }
+        if let w = watts {
+            let va = b.voltage.flatMap { v in b.amperage.map { String(format: " (%.2f V, %.2f A)", v, $0).replacingOccurrences(of: "-", with: "−") } } ?? ""
+            set("power", PowerFlowMath.wattsText(w) + va)
         }
-        set("adapter", b.adapterWatts.map { "\($0) W" } ?? (b.onAC ? L("Connected") : L("Not connected")))
+        set("adapter", b.adapterWatts.map { L("%d W rated", $0) } ?? (b.onAC ? L("Connected") : L("Not connected")))
+        set("display", s.power?.display.map { PowerFlowMath.plain($0) } ?? "–")
+        if let apps = s.energy {
+            for (i, row) in energy.enumerated() {
+                if i < apps.count {
+                    let e = apps[i]
+                    row.0.stringValue = e.processes > 1 ? "\(e.name) (\(e.processes))" : e.name
+                    row.1.stringValue = e.watts < 0.1 ? String(format: "%.2f W", e.watts) : String(format: "%.1f W", e.watts)
+                } else {
+                    row.0.stringValue = i > 0 ? " " : s.energyMeasuring ? L("Measuring…") : L("Nothing measurable")
+                    row.1.stringValue = ""
+                }
+            }
+        }
+        // The registry often lists none on macOS 26; the Bluetooth item's reading (when it's on) has them.
+        let list = !s.devices.isEmpty ? s.devices
+            : (s.bluetooth?.connected ?? []).compactMap { d in d.lowestBattery.map { DeviceBattery(name: d.name, percent: $0) } }
         for (i, row) in devices.enumerated() {
-            if i < s.devices.count {
-                row.0.stringValue = s.devices[i].name
-                row.1.stringValue = "\(s.devices[i].percent)%"
+            if i < list.count {
+                row.0.stringValue = list[i].name
+                row.1.stringValue = "\(list[i].percent)%"
             } else {
                 row.0.stringValue = i == 0 ? L("No Bluetooth devices report a battery") : ""
                 row.1.stringValue = ""

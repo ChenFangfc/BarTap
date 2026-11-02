@@ -62,6 +62,26 @@ final class SMC {
 
     /// Numeric value of a key (°C for temperatures, rpm for fans, W for power), or nil.
     func value(_ key: String) -> Double? {
+        guard let r = raw(key) else { return nil }
+        return SMCValue.decode(type: r.type, bytes: r.bytes)
+    }
+
+    /// Signed or unsigned integer key (battery current in mA, voltage in mV…). The battery
+    /// gauge's keys are little-endian on Apple silicon (B0AV matches AppleSmartBattery's Voltage
+    /// only that way) and big-endian on Intel.
+    func integer(_ key: String) -> Double? {
+        guard let r = raw(key) else { return nil }
+        return SMCValue.integer(type: r.type, bytes: r.bytes, littleEndian: Self.isAppleSilicon)
+    }
+
+    /// True on Apple silicon, also for an Intel build running under Rosetta.
+    static let isAppleSilicon: Bool = {
+        var v: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        return sysctlbyname("hw.optional.arm64", &v, &size, nil, 0) == 0 && v == 1
+    }()
+
+    private func raw(_ key: String) -> (type: String, bytes: [UInt8])? {
         let k = Self.code(key)
         guard let ki = info(k), ki.size > 0, ki.size <= 32 else { return nil }
         var p = Param()
@@ -69,8 +89,7 @@ final class SMC {
         p.info.size = ki.size
         p.command = Command.read.rawValue
         guard let out = call(&p) else { return nil }
-        let bytes = withUnsafeBytes(of: out.bytes) { Array($0.prefix(Int(ki.size))) }
-        return SMCValue.decode(type: Self.name(ki.type), bytes: bytes)
+        return (Self.name(ki.type), withUnsafeBytes(of: out.bytes) { Array($0.prefix(Int(ki.size))) })
     }
 
     /// Every temperature key with a plausible reading, grouped. Enumerating ~2,400 keys takes

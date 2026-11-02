@@ -23,8 +23,12 @@ protocol SettingsHost: AnyObject {
     func pickColor()
     func restartMenuBarHost()
     func reopenSettings()
-    func layoutPaneVisible(_ visible: Bool)
-    func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], completion: @escaping (Bool) -> Void)
+    /// Reveals every icon while Settings › Layout captures their images.
+    func revealForLayout(_ on: Bool)
+    /// Hidden icons are hidden right now (Settings › Layout checks which displays fit the rest).
+    var barCollapsed: Bool { get }
+    func applyLayout(_ request: LayoutApplier.Request, progress: @escaping (Int, Int) -> Void, completion: @escaping (LayoutApplier.Report) -> Void)
+    func cancelLayoutApply()
     var menuBarIsDark: Bool { get }
 }
 
@@ -100,7 +104,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         host?.setHotkeysSuspended(false)
-        host?.layoutPaneVisible(false)
+        host?.revealForLayout(false)
         onClose?()
     }
 
@@ -157,7 +161,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         f.toggle(L("Show or hide by scrolling in the menu bar"), get: { [unowned self] in s.scrollReveal }, set: { [unowned self] in s.scrollReveal = $0 })
         f.toggle(L("Show when clicking empty menu bar space"), get: { [unowned self] in s.emptyClickReveal }, set: { [unowned self] in s.emptyClickReveal = $0 })
         f.toggle(L("Show every section while ⌘-dragging icons"), get: { [unowned self] in s.revealWhileDragging }, set: { [unowned self] in s.revealWhileDragging = $0 })
-        f.note(L("Gestures only observe events; BarTap never moves the pointer or blocks clicks. Without Accessibility access, \"empty space\" is limited to the area right of the notch or the right third of the bar."))
+        f.note(L("Gestures only observe events: they never move the pointer or block clicks. Without Accessibility access, \"empty space\" is limited to the area right of the notch or the right third of the bar."))
 
         f.section(L("Shelf"))
         f.popup(L("Shelf under the menu bar"), options: [
@@ -252,17 +256,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         f.section(L("Menu bar"))
         let model = LayoutPaneModel(host: host)
         f.keep(model)
-        let scroll = NSScrollView()
-        scroll.hasHorizontalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
-        scroll.documentView = model.strip
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.widthAnchor.constraint(equalToConstant: 592).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 86).isActive = true
-        f.custom(nil, scroll)
+        f.note(L("Drag icons between the rows to show or hide them, and along a row to change their order (right-click an icon for the same moves). Nothing changes until you click Apply: BarTap then moves each icon with a ⌘-drag, as you would, with the pointer hidden. Leave the mouse and keyboard alone for those few seconds; using them stops it."))
+        f.custom(nil, model.editor)
+        let apply = NSButton(title: L("Apply"), target: nil, action: nil)
+        let revert = NSButton(title: L("Revert"), target: nil, action: nil)
+        for (button, run) in [(apply, { model.apply() }), (revert, { model.revert() })] {
+            let t = ClosureTarget { _ in run() }
+            f.keep(t)
+            button.target = t
+            button.action = #selector(ClosureTarget.fire(_:))
+            button.bezelStyle = .rounded
+        }
+        f.custom(nil, NSStackView(views: [apply, revert]))
+        model.applyButton = apply
+        model.revertButton = revert
         f.custom(nil, model.status)
-        f.note(L("Drag │ to choose which icons are hidden: the ones left of it. With the Always Hidden section on, drag ‖ for the icons that stay hidden until you ⌥-click. To change the order of the icons themselves, hold ⌘ and drag them in the menu bar; every icon stays shown while this page is open."))
         let allow = f.button(L("Allow Screen Recording…")) { ItemImages.request() }
         model.permissionButton = allow
         f.toggle(L("Enable the Always Hidden section"),
@@ -423,12 +431,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         f.popup(L("Copy as"), options: [("hex", "#RRGGBB"), ("rgb", "rgb(r, g, b)"), ("swiftui", "SwiftUI Color")],
                 get: { [unowned self] in s.colorFormat }, set: { [unowned self] in s.colorFormat = $0 })
         f.button(L("Pick a Color")) { [weak self] in self?.host?.pickColor() }
+
+        VideoDownloadSettings.build(f, settings: s)
     }
 
     private func buildAbout(_ f: Form) {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
         f.section("BarTap \(version)")
-        f.note(L("A lightweight menu bar organizer. Hiding works by resizing BarTap's own divider items; BarTap never posts mouse or keyboard events, never moves the pointer and never blocks clicks. The release build is checked for this automatically."))
+        f.note(L("A lightweight menu bar organizer. Hiding works by resizing BarTap's own divider items, without input events, event taps or cursor warps, and never blocks clicks. Icons move only when you click Apply in Settings › Layout, and that stops as soon as you touch the mouse or keyboard. The release build is checked for this automatically."))
         f.section(L("Permissions"))
         f.note("") {
             AXCatalog.isTrusted ? L("Accessibility: granted — search, shelf and per-icon features are available.")

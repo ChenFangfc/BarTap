@@ -159,37 +159,54 @@ public struct OwnRun: Equatable {
         self.always = always
     }
 
-    /// The run's windows as frames on `screen` (the bar it was found in), or nil.
+    /// Where the run is drawn on one display.
+    public struct Located: Equatable {
+        public var screen: ScreenInfo
+        public var toggle: CGRect
+        public var hidden: CGRect
+        public var always: CGRect?
+        /// The toggle and the stats items, left to right.
+        public var run: [CGRect]
+    }
+
+    /// The run's windows as frames on the first display that draws it, or nil.
     public func locate(screens: [ScreenInfo], windows: [WindowInfo]) -> (screen: ScreenInfo, toggle: CGRect, hidden: CGRect, always: CGRect?)? {
+        for screen in screens {
+            if let f = locate(on: screen, windows: windows) { return (f.screen, f.toggle, f.hidden, f.always) }
+        }
+        return nil
+    }
+
+    /// The run's windows on one display, or nil if that bar doesn't draw it.
+    public func locate(on screen: ScreenInfo, windows: [WindowInfo]) -> Located? {
         let pattern = [toggle] + stats
         func same(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.75 }
-        for screen in screens {
-            let row = MenuBarGeometry.row(on: screen, windows: windows)
-            guard row.contains(where: \.isOnScreen), row.count >= pattern.count else { continue }
-            for j in 0...(row.count - pattern.count) where zip(row[j...], pattern).allSatisfy({ same($0.bounds.width, $1) }) {
-                // │ right before the toggle: open (in the row), or collapsed (the wide window the row stopped at).
-                let divider: CGRect
-                if j > 0, same(row[j - 1].bounds.width, hidden) {
-                    divider = row[j - 1].bounds
-                } else if j == 0, let wide = windows.first(where: {
-                    $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
-                        && $0.bounds.width >= separatorWidthThreshold && abs($0.bounds.maxX - row[0].bounds.minX) <= 2.5
-                }) {
-                    divider = wide.bounds
-                } else {
-                    continue
-                }
-                var alwaysFrame: CGRect?
-                if let always {
-                    alwaysFrame = row[..<max(0, j - 1)].last(where: { same($0.bounds.width, always) })?.bounds
-                        ?? windows.first(where: {   // collapsed: the wide window left of the hidden section
-                            $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
-                                && $0.bounds.width >= separatorWidthThreshold && $0.bounds.maxX <= divider.minX + 2.5
-                                && $0.bounds != divider
-                        })?.bounds
-                }
-                return (screen, row[j].bounds, divider, alwaysFrame)
+        let row = MenuBarGeometry.row(on: screen, windows: windows)
+        guard row.contains(where: \.isOnScreen), row.count >= pattern.count else { return nil }
+        for j in 0...(row.count - pattern.count) where zip(row[j...], pattern).allSatisfy({ same($0.bounds.width, $1) }) {
+            // │ right before the toggle: open (in the row), or collapsed (the wide window the row stopped at).
+            let divider: CGRect
+            if j > 0, same(row[j - 1].bounds.width, hidden) {
+                divider = row[j - 1].bounds
+            } else if j == 0, let wide = windows.first(where: {
+                $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
+                    && $0.bounds.width >= separatorWidthThreshold && abs($0.bounds.maxX - row[0].bounds.minX) <= 2.5
+            }) {
+                divider = wide.bounds
+            } else {
+                continue
             }
+            var alwaysFrame: CGRect?
+            if let always {
+                alwaysFrame = row[..<max(0, j - 1)].last(where: { same($0.bounds.width, always) })?.bounds
+                    ?? windows.first(where: {   // collapsed: the wide window left of the hidden section
+                        $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
+                            && $0.bounds.width >= separatorWidthThreshold && $0.bounds.maxX <= divider.minX + 2.5
+                            && $0.bounds != divider
+                    })?.bounds
+            }
+            return Located(screen: screen, toggle: row[j].bounds, hidden: divider, always: alwaysFrame,
+                           run: row[j..<(j + pattern.count)].map(\.bounds))
         }
         return nil
     }
@@ -257,5 +274,147 @@ public enum LayoutValidator {
         if k.hidden <= k.toggle { return .hiddenRightOfToggle }
         if let a = k.alwaysHidden, a <= k.hidden { return .alwaysRightOfHidden }
         return nil
+    }
+}
+
+/// Turns the menu bar's order into a wanted one with ⌘-drags, working from the right: each step
+/// drops one icon immediately left of its wanted right-hand neighbour, so icons already in place
+/// are never moved again. Anchors (BarTap's own items, the Control Center and clock that macOS
+/// keeps at the right end) never move.
+public enum LayoutPlan {
+    public struct Step: Equatable {
+        public let item: String
+        /// Drop immediately left of this one.
+        public let leftOf: String
+        public init(item: String, leftOf: String) {
+            self.item = item
+            self.leftOf = leftOf
+        }
+    }
+
+    /// The next drag, or nil once `current` (left to right) has `wanted`'s order. Keys in `current`
+    /// that `wanted` doesn't mention stay where they are; keys missing from `current` are skipped.
+    public static func nextStep(current: [String], wanted: [String], anchors: Set<String>) -> Step? {
+        // Icons the plan doesn't know (one that appeared since) don't count as being in the way.
+        let known = Set(wanted)
+        var position: [String: Int] = [:]
+        for (i, key) in current.filter(known.contains).enumerated() where position[key] == nil { position[key] = i }
+        let present = wanted.filter { position[$0] != nil }
+        guard present.count >= 2 else { return nil }
+        for i in stride(from: present.count - 2, through: 0, by: -1) {
+            let item = present[i], right = present[i + 1]
+            guard !anchors.contains(item), let p = position[item], let r = position[right] else { continue }
+            if p + 1 != r { return Step(item: item, leftOf: right) }
+        }
+        return nil
+    }
+
+    /// Every step, by applying each one to a copy of `current` (for progress and tests).
+    public static func steps(current: [String], wanted: [String], anchors: Set<String>) -> [Step] {
+        var order = current
+        var out: [Step] = []
+        while let step = nextStep(current: order, wanted: wanted, anchors: anchors), out.count <= order.count * 2 {
+            out.append(step)
+            order.removeAll { $0 == step.item }
+            if let r = order.firstIndex(of: step.leftOf) { order.insert(step.item, at: r) }
+        }
+        return out
+    }
+}
+
+/// Settings › Layout's rows: the icons that are shown, hidden or always hidden, each left to right
+/// as in the menu bar. Pinned icons (Control Center and the clock, which macOS keeps at the right
+/// end) follow Shown and never move.
+public struct LayoutArrangement: Equatable {
+    public enum Row: Int, CaseIterable {
+        // Right to left in the menu bar.
+        case shown, hidden, always
+    }
+
+    public var shown: [String]
+    public var hidden: [String]
+    public var always: [String]
+    public var pinned: [String]
+
+    public init(shown: [String] = [], hidden: [String] = [], always: [String] = [], pinned: [String] = []) {
+        self.shown = shown
+        self.hidden = hidden
+        self.always = always
+        self.pinned = pinned
+    }
+
+    public subscript(row: Row) -> [String] {
+        get {
+            switch row {
+            case .shown: return shown
+            case .hidden: return hidden
+            case .always: return always
+            }
+        }
+        set {
+            switch row {
+            case .shown: shown = newValue
+            case .hidden: hidden = newValue
+            case .always: always = newValue
+            }
+        }
+    }
+
+    public func row(of key: String) -> Row? { Row.allCases.first { self[$0].contains(key) } }
+
+    /// Puts `key` at `index` of `row` (an index among that row's icons before the move).
+    public mutating func move(_ key: String, to row: Row, at index: Int) {
+        guard let from = self.row(of: key), let i = self[from].firstIndex(of: key) else { return }
+        self[from].remove(at: i)
+        var j = index
+        if from == row && i < index { j -= 1 }
+        self[row].insert(key, at: max(0, min(j, self[row].count)))
+    }
+
+    /// Moves `key` to the end of `row` nearest the row it leaves, which is where a divider move
+    /// would have put it.
+    public mutating func send(_ key: String, to row: Row) {
+        guard let from = self.row(of: key), from != row else { return }
+        // Further right (a lower row) → its left end; further left → its right end.
+        move(key, to: row, at: row.rawValue < from.rawValue ? 0 : self[row].count)
+    }
+
+    /// The whole bar left to right, with BarTap's dividers as "‖" and "│" (the toggle and stats
+    /// items follow "│"). Without the always-hidden section its icons count as hidden.
+    public func order(alwaysSection: Bool) -> [String] {
+        (alwaysSection ? always + ["‖"] + hidden : always + hidden) + ["│"] + shown + pinned
+    }
+
+    /// These edits on top of the bar as it is now: icons that went away are dropped, new ones
+    /// join the row they appeared in, next to the icon they appeared after.
+    public func merged(into live: LayoutArrangement) -> LayoutArrangement {
+        let present = Set(Row.allCases.flatMap { live[$0] })
+        var out = self
+        out.pinned = live.pinned
+        for row in Row.allCases { out[row] = out[row].filter(present.contains) }
+        let known = Set(Row.allCases.flatMap { out[$0] })
+        for row in Row.allCases {
+            for (i, key) in live[row].enumerated() where !known.contains(key) {
+                let after = live[row][..<i].last(where: { out[row].contains($0) })
+                let at = after.flatMap { out[row].firstIndex(of: $0) }.map { $0 + 1 } ?? 0
+                out[row].insert(key, at: at)
+            }
+        }
+        return out
+    }
+}
+
+extension MenuBarGeometry {
+    /// With hidden icons hidden, each display draws the same run of icons from its right edge to
+    /// BarTap's divider, except one too narrow for all of them: macOS leaves out what doesn't fit.
+    /// Returns those displays with how many icons they leave out. Displays whose bar isn't drawn
+    /// (full screen, lid closed) don't count.
+    public static func shortRows(screens: [ScreenInfo], windows: [WindowInfo]) -> [(screen: ScreenInfo, missing: Int)] {
+        let drawn = screens.compactMap { s -> (ScreenInfo, Int)? in
+            let n = row(on: s, windows: windows).filter(\.isOnScreen).count
+            return n == 0 ? nil : (s, n)
+        }
+        guard let most = drawn.map(\.1).max() else { return [] }
+        return drawn.filter { $0.1 < most }.map { ($0.0, most - $0.1) }
     }
 }

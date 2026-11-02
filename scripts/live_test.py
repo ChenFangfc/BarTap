@@ -78,7 +78,8 @@ def catalog():
     except FileNotFoundError:
         pass
     cmd("debug/catalog")
-    for _ in range(60):
+    # Accessibility reads every app's icons; with many apps that can take a few seconds.
+    for _ in range(160):
         if CATALOG.exists():
             break
         time.sleep(0.05)
@@ -207,6 +208,20 @@ def scenario_show_hide():
     for name, s in now.items():
         # Other apps may add/remove an icon meanwhile; the invariant is "collapsed again".
         check(s["separators"] >= 1 and s["drawnSeparators"] == 0, f'{name}: collapsed again')
+    # One divider for every display: each draws the same icons in the same order; a narrow one only
+    # leaves some out (macOS drops what doesn't fit, not always the leftmost), never shows others.
+    def subsequence(small, big):
+        it = iter(big)
+        return all(any(x == y for y in it) for x in small)
+    runs = {name: [w["w"] for w in reversed(s["row"]) if w["on"]] for name, s in now.items() if any(w["on"] for w in s["row"])}
+    if runs:
+        widest = max(runs.values(), key=len)
+        for name, run in runs.items():
+            check(subsequence(run, widest), f"{name}: same icons as the widest display ({run} vs {widest})")
+            if len(run) < len(widest):
+                notes.append(f"{name} leaves out {len(widest) - len(run)} shown icon(s): too narrow")
+        if any(len(r) < len(widest) for r in runs.values()):
+            check(state().get("crowding", "") != "", "Settings › Layout names the display that is too narrow")
     cmd("show/all"); time.sleep(0.8)
     check(state()["effectiveLevel"] == "revealedAll", "show/all")
     cmd("hide"); time.sleep(0.8)
@@ -530,9 +545,8 @@ def scenario_stats_live():
     check(all(w == widths[0] for w in widths), f"widths changed over time: {widths}")
     # Every stats item must actually be on the bar (right of the toggle, i.e. Shown) while collapsed.
     cmd("hide"); time.sleep(1.5)
-    ext = [x for x in probe() if not x["notch"]]
-    ok, detail = stats_items_beside_toggle(state(), ext)
-    check(ok, f"stats items are drawn right of the toggle while icons are hidden ({detail})")
+    # BarTap's run, found the way the app finds it: the toggle, then every stats item, by exact widths.
+    check(wait_until(lambda: state().get("ownRunOn"), 6), "stats items are drawn right of the toggle while icons are hidden")
     for m in ["cpu", "gpu", "memory", "disk", "network", "sensors", "battery", "time"]:
         cmd(f"debug/stats-open-{m}")
     time.sleep(1.5)
@@ -636,43 +650,112 @@ def scenario_first_run_with_stats():
     check(ok, f"stats items sit right of the toggle and are drawn ({detail})")
 
 
-def scenario_layout_dividers():
-    print("• Settings › Layout: dragging │ moves only BarTap's items, into the chosen gap")
+def idle_seconds():
+    out = sh("ioreg", "-c", "IOHIDSystem", "-d", "4", check=False)
+    for line in out.splitlines():
+        if "HIDIdleTime" in line:
+            return int(line.split()[-1]) / 1e9
+    return 0.0
+
+
+def wait_idle(seconds=3.0, timeout=600):
+    """Moving icons needs the user away from the mouse and keyboard (any input stops it)."""
+    return wait_until(lambda: idle_seconds() >= seconds, timeout, step=1.0)
+
+
+def arrangement(rows):
+    pinned_ids = {"com.apple.menuextra.controlcenter", "com.apple.menuextra.clock"}
+    a = {"shown": [], "hidden": [], "always": [], "pinned": []}
+    for r in rows:
+        if r["section"] == "shown" and r.get("id") in pinned_ids:
+            a["pinned"].append(r["key"])
+        else:
+            a[{"shown": "shown", "hidden": "hidden", "alwaysHidden": "always"}[r["section"]]].append(r["key"])
+    return a
+
+
+def base_order(a):
+    """Rows as apps' icons, left to right: an app's icons are numbered by position, so compare without the number."""
+    return {k: [x.rsplit("#", 1)[0] for x in a[k]] for k in ("always", "hidden", "shown", "pinned")}
+
+
+def same_order(got, wanted):
+    """Rows match for every app both readings saw: an app that answers Accessibility too slowly
+    is left out of one reading for a while, though its icons never left the bar."""
+    seen = lambda a: {x for row in base_order(a).values() for x in row}
+    present = seen(got) & seen(wanted)
+    keep = lambda a: {k: [x for x in v if x in present] for k, v in base_order(a).items()}
+    if seen(got) ^ seen(wanted):
+        notes.append(f"layout: in one reading only (slow to answer Accessibility, or just appeared): {sorted(seen(got) ^ seen(wanted))}")
+    return keep(got) == keep(wanted)
+
+
+def apply_rows(a, timeout=120):
+    """Writes the request, runs Settings › Layout's Apply, and returns its outcome line."""
+    req = pathlib.Path.home() / "Library/Application Support/BarTap/layout-request.json"
+    req.write_text(json.dumps(a))
+    before = state().get("layoutApply", "")
+    cmd("debug/layout-apply")
+    done = lambda: (lambda st: st.get("layoutApply", "") != before and not st.get("layoutApplying") and not st.get("layoutApply", "").startswith("running"))(state())
+    wait_until(done, timeout, step=0.5)
+    time.sleep(1.0)
+    req.unlink(missing_ok=True)
+    return state().get("layoutApply", "")
+
+
+def scenario_layout_apply():
+    print("• Settings › Layout: Apply moves icons between rows and along them, then restores")
     if not state().get("axTrusted"):
         notes.append("layout scenario skipped: Accessibility not granted")
         return
-    # A normal session: no first-run placement still waiting for the notched bar.
     quit_app()
     defaults_write("placementPending", "bool", "false")
     launch(wait=1.0)
-    stats_on(["cpu", "memory", "network"])
-    time.sleep(3)
+    time.sleep(2)
+    # The page reveals every icon only while it captures them, then puts the bar back as it was.
+    cmd("hide"); time.sleep(0.8)
+    cmd("debug/layout-page-open"); time.sleep(1.5)
+    check(state()["effectiveLevel"] == "revealedAll", "icons revealed for capturing when the page opens")
+    check(wait_until(lambda: state()["effectiveLevel"] == "collapsed", 15), "bar hidden again while the page stays open")
+    check(state().get("imageCache", 0) > 0, "icons captured")
+    cmd("debug/layout-page-close"); time.sleep(0.5)
     cmd("debug/layout-open"); time.sleep(3)
-    check(state()["effectiveLevel"] == "revealedAll", "every icon shown while the page is open")
-    rows = catalog()
-    if len(rows) < 6:
-        notes.append(f"layout scenario: only {len(rows)} icons")
+    check(state()["effectiveLevel"] == "revealedAll", "every icon shown for the moves")
+    original = arrangement(catalog())
+    if len(original["hidden"]) + len(original["shown"]) < 4:
+        notes.append("layout scenario: too few icons")
         cmd("debug/layout-close")
         return
-    # Two gaps mid-bar, each between icons of different apps: the newest apps' icons at the far left
-    # can't have anything left of them, and some apps (iStat Menus) keep their icons together.
-    gaps = [g for g in range(2, len(rows)) if rows[g - 1]["app"] != rows[g]["app"]]
-    gaps.sort(key=lambda g: abs(g - len(rows) // 2))
-    for goal in sorted(gaps[:2]):
-        cmd(f"debug/move-hidden-{goal}")
-        time.sleep(1.0)
-        wait_until(lambda: not state().get("layoutMoving", False) and not state().get("placementSettling", False), 90, step=0.5)
-        time.sleep(1.0)
-        st = state()
-        got = sum(1 for r in catalog() if r["section"] != "shown")
-        print(f"    to {goal}: {st['layoutMove'].split('[')[0].strip()} → {got} hidden")
-        # Exact unless another app moves its own icon meanwhile (App Cleaner re-creates its icon to
-        # update a badge; iStat Menus keeps its icons together): then right next to it.
-        check(abs(got - goal) <= 1, f"divider in gap {goal} (got {got})")
-        if got != goal:
-            notes.append(f"layout: asked for gap {goal}, landed in {got} (another app's icon moved)")
-        check(st["layoutProblem"] == "", f"layout problem {st['layoutProblem']!r}")
-    check(sh("defaults", "read", DOMAIN, "NSStatusItem Preferred Position tb_probe", check=False).strip() == "", "probe key removed")
+    tests = []
+    h = original["hidden"]
+    pair = next((i for i in range(len(h) - 1) if h[i].split("|")[0] != h[i + 1].split("|")[0]), None)
+    if pair is not None:
+        swapped = dict(original, hidden=h[:pair] + [h[pair + 1], h[pair]] + h[pair + 2:])
+        tests.append(("swap two hidden icons", swapped))
+    if h:
+        across = dict(original, hidden=h[:-1], shown=[h[-1]] + original["shown"])
+        tests.append(("rightmost hidden icon → shown", across))
+    for name, wanted in tests:
+        if not wait_idle():
+            notes.append(f"layout: {name} skipped (the mouse or keyboard stayed in use)")
+            continue
+        out = apply_rows(wanted)
+        got = arrangement(catalog())
+        print(f"    {name}: {out.split('[')[0].strip()}")
+        if "interrupted" in out:
+            notes.append(f"layout: {name} interrupted by input")
+        else:
+            check(same_order(got, wanted), f"{name}: bar matches ({base_order(got)} vs {base_order(wanted)})")
+        # Put the user's arrangement back, waiting out any input.
+        for _ in range(3):
+            wait_idle()
+            out = apply_rows(original)
+            if "interrupted" not in out:
+                break
+        restored = arrangement(catalog())
+        print(f"    restore: {out.split('[')[0].strip()}")
+        check(same_order(restored, original), f"{name}: original order restored ({base_order(restored)})")
+    check(state()["layoutProblem"] == "", "no layout problem afterwards")
     cmd("debug/layout-close"); time.sleep(1.5)
     check(state()["effectiveLevel"] == "collapsed", "collapses again when the page closes")
 
@@ -751,7 +834,7 @@ SCENARIOS = {
     "takeover": scenario_takeover_hunt,
     "reset_stats": scenario_reset_with_stats,
     "first_run_stats": scenario_first_run_with_stats,
-    "layout": scenario_layout_dividers,
+    "layout": scenario_layout_apply,
     "jitter": scenario_jitter,
     "time": scenario_time_module,
     "ai": scenario_ai_usage,

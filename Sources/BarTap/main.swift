@@ -25,6 +25,22 @@ if let i = CommandLine.arguments.firstIndex(of: "--export-promo-assets"), i + 1 
     PromoAssets.export(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
     exit(0)
 }
+// Volume, Bluetooth, 3-in-1 and power-flow checks (see TrioProbe): no status items, no prompts.
+let trioArgs = CommandLine.arguments
+if trioArgs.contains("--trio-probe") {
+    TrioProbe.probe(names: trioArgs.contains("--names"))
+    exit(0)
+}
+if let i = trioArgs.firstIndex(of: "--trio-render"), i + 1 < trioArgs.count {
+    TrioProbe.render(to: URL(fileURLWithPath: trioArgs[i + 1]), live: trioArgs.contains("--live"))
+    exit(0)
+}
+if let i = trioArgs.firstIndex(of: "--trio-cpu"), i + 1 < trioArgs.count {
+    TrioProbe.cpu(seconds: Double(trioArgs[i + 1]) ?? 60, detail: trioArgs.contains("--detail"))
+    exit(0)
+}
+// Headless video-download checks (--video-download, --ytdlp-install, --render-downloads).
+if let status = VideoDownloadCLI.handle(CommandLine.arguments) { exit(status) }
 
 // One-time migration of settings (and the user's menu bar arrangement) from the app's
 // previous name, Tidybar.

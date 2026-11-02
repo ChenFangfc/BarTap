@@ -46,6 +46,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>BarTap uses Bluetooth only when you click Connect or Disconnect in its Bluetooth menu, to connect or disconnect that paired device.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>BarTap — a lightweight, event-free menu bar organizer.</string>
 	<key>NSSupportsAutomaticTermination</key>

@@ -2,7 +2,7 @@
 //
 //   swiftc -O promo/shots.swift -o .build/shots && .build/shots <repo>
 //
-// Writes docs/media/{bar,panels,layouts}-{light,dark}.png.
+// Writes docs/media/{bar,panels,panels2,layouts}-{light,dark}.png.
 import AppKit
 
 let root = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
@@ -68,13 +68,14 @@ for dark in [false, true] {
     }
 }
 
-// 2. Three dropdowns side by side.
+// 2. Three dropdowns side by side, twice: stats and AI; then power, Bluetooth and sound.
+for (name, set) in [("panels", ["cpu", "network", "ai"]), ("panels2", ["battery", "bluetooth", "volume"])] {
 for dark in [false, true] {
-    let panels = ["cpu", "network", "ai"].map { asset("panel_\($0)_\(dark ? "dark" : "light").png") }
+    let panels = set.map { asset("panel_\($0)_\(dark ? "dark" : "light").png") }
     let pg: CGFloat = 28, m: CGFloat = 36
     let w = panels.reduce(0) { $0 + $1.size.width } + pg * CGFloat(panels.count - 1) + 2 * m
     let h = (panels.map(\.size.height).max() ?? 0) + 2 * m
-    render(NSSize(width: w, height: h), scale: 2, "panels-\(dark ? "dark" : "light").png") {
+    render(NSSize(width: w, height: h), scale: 2, "\(name)-\(dark ? "dark" : "light").png") {
         var x = m
         for p in panels {
             let r = NSRect(x: x, y: h - m - p.size.height, width: p.size.width, height: p.size.height)
@@ -90,13 +91,15 @@ for dark in [false, true] {
         }
     }
 }
+}
 
 // 3. Layouts: a few combinations per module, each on its own menu-bar strip.
 let rows: [(String, [String])] = [
     ("CPU", ["cpu-preset0", "cpu-preset5", "cpu-preset4", "cpu-preset3", "cpu-preset7"]),
     ("Memory", ["memory-preset1", "memory-preset2", "memory-preset0", "memory-preset7", "memory-preset5"]),
     ("Disk", ["disk-preset1", "disk-preset2", "disk-preset3", "disk-preset7", "disk-preset0"]),
-    ("Network · Sensors · Battery", ["network-preset0", "network-preset2", "sensors-preset1", "battery-preset0", "battery-preset4"]),
+    ("Network · Sensors · Battery", ["network-preset0", "network-preset2", "sensors-preset1", "battery-preset0", "battery-preset5"]),
+    ("Volume · Bluetooth · 3-in-1", ["volume-preset0", "volume-preset3", "bluetooth-preset1", "bluetooth-preset4", "trio-preset1"]),
     ("AI usage", ["ai-preset5", "ai-preset6", "ai-preset3", "ai-preset4", "ai-peragent0"]),
 ]
 let chipGap: CGFloat = 10, chipPad: CGFloat = 8, rowH: CGFloat = 30, labelW: CGFloat = 190, lm: CGFloat = 20

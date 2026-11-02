@@ -12,13 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     private let gestures = MouseGestures()
     private let rules = RuleMonitor()
     let catalog = AXCatalog()
-    private let placer = DividerPlacer()
-    /// Settings › Layout is showing: every icon stays revealed so it can be seen and ⌘-dragged.
-    private var layoutPaneOpen = false
+    /// Settings › Layout is capturing icons, or its Apply is running: every icon stays revealed meanwhile.
+    private var layoutHolds: Set<String> = []
     private var levelBeforeLayoutPane: RevealLevel?
-    /// Last divider move from Settings › Layout (debug), and whether one is still under way.
-    private(set) var lastLayoutMove = ""
-    private(set) var layoutMoving = false
+    private lazy var layoutApplier = LayoutApplier(catalog: catalog, mover: IconMover(), ownRun: { [weak self] in self?.catalog.ownRun?() })
+    /// The last Apply's outcome, numbered (debug).
+    private var lastLayoutApply = ""
+    private var layoutApplyRuns = 0
     private(set) var stats: StatsController?
     private var searchPanel: SearchPanel?
     private var shelfPanel: ShelfPanel?
@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     func applicationWillTerminate(_ notification: Notification) {
         keepAwake.stop(notify: false)
         stats?.flush()
+        VideoDownloads.shared.stopAll()
     }
 
     private func startUp() {
@@ -75,10 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
                           always: self.bar.alwaysItem?.button?.window?.frame.width)
         }
         reveal.ownPanelVisible = { [weak self] in
-            (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false) || (self?.layoutPaneOpen ?? false)
+            (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false) || !(self?.layoutHolds.isEmpty ?? true)
         }
         keepAwake.onChange = { [weak self] in self?.stateChanged() }
 
+        VideoDownloads.shared.settings = settings
         let firstRun = !settings.didPlaceItems
         if firstRun { seedInitialPositions(extraDrop: 0, firstRun: true) }
         bar.createItems(alwaysHidden: settings.alwaysHiddenEnabled)
@@ -328,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = L("Welcome to BarTap")
-        alert.informativeText = L("• Hold ⌘ and drag menu bar icons to the left of the │ divider to hide them.\n• Click the BarTap toggle (or press ⌃⌥⌘B) to show or hide them.\n• Icons that were hidden behind the notch now start in the Hidden section.\n• Optional: allow Accessibility access to search icons (⌃⌥⌘F) and to use the shelf below the menu bar.\n\nBarTap never moves your pointer or blocks your clicks.")
+        alert.informativeText = L("• Choose which icons to hide in Settings › Layout, or hold ⌘ and drag them left of the │ divider yourself.\n• Click the BarTap toggle (or press ⌃⌥⌘B) to show or hide them.\n• Icons that were hidden behind the notch now start in the Hidden section.\n• Optional: allow Accessibility access to arrange icons in Settings › Layout, search icons (⌃⌥⌘F) and use the shelf below the menu bar.\n\nHiding never moves your pointer or blocks your clicks. Icons move only when you click Apply in Settings › Layout.")
         alert.addButton(withTitle: L("Got It"))
         alert.addButton(withTitle: L("Allow Accessibility…"))
         alert.addButton(withTitle: L("Open Settings"))
@@ -658,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         awake.state = keepAwake.isActive ? .on : .off
         m.addItem(awake)
         m.addItem(item(L("Pick a Color…")) { [weak self] in self?.pickColor() })
+        if settings.videoDownloadsEnabled { m.addItem(item(VideoDownloads.menuTitle) { VideoDownloads.shared.showPanel() }) }
 
         if let problem = reveal.layoutProblem, problem != .notReady {
             m.addItem(.separator())
@@ -707,10 +710,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
 
     func catalogSnapshot(_ completion: @escaping ([BarItem]) -> Void) { catalog.snapshot(completion: completion) }
 
-    func layoutPaneVisible(_ visible: Bool) {
-        guard visible != layoutPaneOpen else { return }
-        layoutPaneOpen = visible
-        if visible {
+    func revealForLayout(_ on: Bool) { holdLayout("capture", on) }
+
+    var barCollapsed: Bool { reveal.effectiveLevel == .collapsed }
+
+    /// Reveals every icon while anything holds the layout (the pane, a running Apply), and puts the
+    /// bar back as it was once nothing does.
+    private func holdLayout(_ reason: String, _ on: Bool) {
+        let wasHeld = !layoutHolds.isEmpty
+        if on { layoutHolds.insert(reason) } else { layoutHolds.remove(reason) }
+        guard wasHeld != !layoutHolds.isEmpty else { return }
+        if !wasHeld {
             levelBeforeLayoutPane = reveal.effectiveLevel
             reveal.reveal(.revealedAll, source: .command)
         } else if levelBeforeLayoutPane == .collapsed {
@@ -722,93 +732,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         bar.toggleItem?.button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
-    /// Settings › Layout: puts │ (or ‖) in gap `gap` of `items`, listed left to right as measured now.
-    /// Finds keys that land there (see DividerPlacer), then re-creates BarTap's items with them.
-    func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], completion: @escaping (Bool) -> Void) {
-        layoutMoving = true
-        moveDivider(handle, toGap: gap, items: items, retries: 1) { [weak self] ok in
-            self?.layoutMoving = false
-            completion(ok)
-        }
-    }
-
-    /// Re-creating our items can make macOS re-sort other icons too, so the result is checked once
-    /// placement settles and, if it landed elsewhere, measured and placed again (once).
-    private func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], retries: Int, completion: @escaping (Bool) -> Void) {
-        let d = UserDefaults.standard
-        func stored(_ name: String) -> Double? { d.object(forKey: StatusBarController.preferredPositionKey(name)) as? Double }
-        let hiddenGap = items.filter { $0.section != .shown }.count
-        let alwaysGap: Int? = settings.alwaysHiddenEnabled ? items.filter { $0.section == .alwaysHidden }.count : nil
-        placer.keys(forGap: gap, among: items, estimate: estimatedKey(forGap: gap, items: items)) { [weak self] range in
+    /// Settings › Layout's Apply: moves icons until the bar matches `request` (see LayoutApplier).
+    func applyLayout(_ request: LayoutApplier.Request, progress: @escaping (Int, Int) -> Void, completion: @escaping (LayoutApplier.Report) -> Void) {
+        guard !layoutApplier.running else { return }
+        let wasRevealed = reveal.effectiveLevel == .revealedAll
+        holdLayout("apply", true)
+        lastLayoutApply = "running"
+        // A bar that was just revealed needs a moment to draw every icon.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wasRevealed ? 0 : 1.0)) { [weak self] in
             guard let self else { return }
-            self.lastLayoutMove = "\(handle) to \(gap): \(range.map { String(format: "%.2f…%.2f", $0.low, $0.high) } ?? "no key") in \(self.placer.lastTries) tries ["
-                + self.placer.lastLog.joined(separator: " ") + "]"
-            guard let r = range else { completion(false); return }
-            let room = r.high - r.low
-            switch handle {
-            case .hidden:
-                // Stats items take keys just below the toggle's: leave them room above the gap's floor.
-                let toggle = min(r.high - room * 0.1, r.low + max(0.3, room * 0.35))
-                let hidden = toggle + min(0.25, (r.high - toggle) / 2)
-                var always = stored("tb_always")
-                if let a = alwaysGap, a >= gap { always = hidden + min(0.25, (r.high - hidden) / 2) }
-                self.placeDividers(toggle: toggle, hidden: hidden, always: alwaysGap == nil ? nil : always)
-            case .always:
-                guard let toggle = stored("tb_toggle"), let hidden = stored("tb_hidden") else { completion(false); return }
-                // In the divider's own gap ‖ has to sit left of │.
-                let always = gap >= hiddenGap ? hidden + max(0.01, min(0.25, (r.high - hidden) / 2)) : (r.low + r.high) / 2
-                self.placeDividers(toggle: toggle, hidden: hidden, always: always)
-            }
-            self.afterPlacementSettles { [weak self] in
-                guard let self, retries > 0 else { completion(true); return }
-                self.catalog.snapshot { items in
-                    let got = handle == .hidden ? items.filter { $0.section != .shown }.count : items.filter { $0.section == .alwaysHidden }.count
-                    guard got != gap else { completion(true); return }
-                    self.moveDivider(handle, toGap: gap, items: items, retries: retries - 1, completion: completion)
-                }
-            }
+            self.layoutApplier.run(request, progress: { [weak self] k, n in
+                self?.lastLayoutApply = "running \(k)/\(n)"
+                progress(k, n)
+            }, completion: { [weak self] report in
+                guard let self else { return }
+                self.layoutApplyRuns += 1
+                self.lastLayoutApply = "#\(self.layoutApplyRuns) \(report.finish) moves=\(report.moves) stuck=\(report.stuck.count) notDrawn=\(report.notDrawn.count) left=\(report.left) ["
+                    + self.layoutApplier.log.joined(separator: "; ") + "]"
+                // The pane captures the new order before the bar goes back (no flash in between).
+                completion(report)
+                self.holdLayout("apply", false)
+            })
         }
     }
 
-    private func afterPlacementSettles(_ then: @escaping () -> Void, waited: Int = 0) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            if self.placementSettling, waited < 40 { self.afterPlacementSettles(then, waited: waited + 1) } else { then() }
-        }
-    }
-
-    /// The probe's first guess: the gap's distance from the right, less BarTap's own items right of
-    /// it (other apps' keys were mostly stored before those were there).
-    private func estimatedKey(forGap gap: Int, items: [BarItem]) -> Double {
-        let boundary: CGFloat = gap < items.count ? items[gap].order + items[gap].frame.width : max(1, (items.last?.order ?? 2) - 1)
-        let toggle = bar.ownFrames().toggle
-        let ownWidth = 31 + (stats?.shownWidth() ?? 0) + 20
-        return Double(max(1, boundary - (toggle.width > 0 && boundary > -toggle.minX ? ownWidth : 0)))
-    }
-
-    /// Re-creates BarTap's items with exact keys: like a reset, but in the spot the user chose. The
-    /// placement check afterwards still keeps the toggle visible on every bar.
-    func placeDividers(toggle: Double, hidden: Double, always: Double?) {
-        settings.placementPending = false
-        settings.provisionalToggleKey = nil
-        placementSettling = true
-        placementRetries = 0
-        placementWaits = 0
-        lastMeasuredToggle = nil
-        pendingPlacementCheck?.cancel()
-        bar.removeAllItems()
-        stats?.removeItemsForReplacement()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self else { return }
-            StatusBarController.storeKeys(toggle: toggle, hidden: hidden, always: always, in: .standard)
-            self.bar.createItems(alwaysHidden: self.settings.alwaysHiddenEnabled)
-            self.reveal.refresh()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.stats?.apply()
-                self?.verifyFirstPlacement()
-            }
-        }
-    }
+    func cancelLayoutApply() { layoutApplier.cancel() }
 
     func requestAccessibility() {
         AXCatalog.requestTrust()
@@ -919,9 +867,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "settingsControllersAlive": SettingsWindowController.liveCount,
             "resetCount": resetCount,
             "placementSettling": placementSettling,
-            "layoutMove": lastLayoutMove,
-            "layoutMoving": layoutMoving,
-            "layoutPaneOpen": layoutPaneOpen,
+            "layoutApply": lastLayoutApply,
+            "layoutApplying": layoutApplier.running,
+            "layoutPaneOpen": layoutHolds.contains("capture"),
+            "crowding": barCollapsed ? (LayoutPaneModel.crowdedDisplays() ?? "") : "",
+            // Displays that draw BarTap's run (toggle, then every stats item) by exact window widths.
+            "ownRunOn": { () -> [Int] in
+                let windows = SystemQueries.windows(onScreenOnly: false)
+                guard let run = catalog.ownRun?() else { return [] }
+                return SystemQueries.screens(windows: windows).filter { run.locate(on: $0, windows: windows) != nil }.map { Int($0.id) }
+            }(),
             "screenRecording": ItemImages.permitted,
             // macOS's padding around each of our items (window width = length + this).
             "itemSpacing": UserDefaults.standard.integer(forKey: "NSStatusItemSpacing"),
@@ -948,7 +903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     /// What Accessibility sees in the menu bar, as JSON (debug; local only).
     func debugCatalog() {
         catalog.snapshot { items in
-            let rows = items.map { ["app": $0.appName, "section": "\($0.section)", "rd": Int($0.order)] as [String: Any] }
+            let rows = items.map { ["app": $0.appName, "section": "\($0.section)", "rd": Int($0.order), "key": $0.slotKey, "id": $0.identifier ?? ""] as [String: Any] }
             let url = DebugRender.dir.deletingLastPathComponent().appendingPathComponent("catalog-classified.json")
             if let data = try? JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted]) { try? data.write(to: url) }
         }
@@ -1048,6 +1003,8 @@ final class ClosureMenuTarget: NSObject {
 }
 
 enum Debug {
+    private static var pane: LayoutPaneModel?
+
     static func run(_ what: String, app: AppDelegate) {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("BarTap")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1089,23 +1046,34 @@ enum Debug {
         case "close-menu":
             app.debugCloseMenu()
         case "layout-render":
-            // The Settings › Layout strip as it would show now, rendered to a file (debug).
+            // The Settings › Layout editor as it would show now, rendered to a file (debug).
             let model = LayoutPaneModel(host: app)
             model.start()
             DispatchQueue.main.asyncAfter(deadline: .now() + 7.0) {
-                for dark in [false, true] { DebugRender.view(model.strip, "layout_strip_\(dark ? "dark" : "light")", dark: dark) }
+                for dark in [false, true] { DebugRender.view(model.editor, "layout_editor_\(dark ? "dark" : "light")", dark: dark) }
                 model.stop()
             }
+        case "layout-page-open":
+            // Settings › Layout's model as the pane runs it, without the window (debug).
+            pane = LayoutPaneModel(host: app)
+            pane?.start()
+        case "layout-page-close":
+            pane?.stop()
+            pane = nil
         case "layout-open":
-            app.layoutPaneVisible(true)
+            app.revealForLayout(true)
         case "layout-close":
-            app.layoutPaneVisible(false)
-        case let w where w.hasPrefix("move-hidden-") || w.hasPrefix("move-always-"):
-            // Move a divider to a gap of the current layout, as dragging it in Settings › Layout does.
-            let handle: LayoutHandle = w.hasPrefix("move-hidden-") ? .hidden : .always
-            if let gap = Int(w.dropFirst("move-hidden-".count)) {
-                app.catalogSnapshot { items in app.moveDivider(handle, toGap: gap, items: items) { _ in } }
-            }
+            app.revealForLayout(false)
+        case "layout-apply":
+            // Apply the rows in layout-request.json ({"shown": [keys], "hidden": [...], "always": [...], "pinned": [...]},
+            // keys as in catalog-classified.json), as Settings › Layout's Apply does (debug).
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent("layout-request.json")),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [String: [String]] else { break }
+            let wanted = LayoutArrangement(shown: rows["shown"] ?? [], hidden: rows["hidden"] ?? [], always: rows["always"] ?? [], pinned: rows["pinned"] ?? [])
+            let touched = Set(wanted.shown + wanted.hidden + wanted.always)
+            app.applyLayout(.init(arrangement: wanted, alwaysSection: app.settings.alwaysHiddenEnabled, touched: touched), progress: { _, _ in }, completion: { _ in })
+        case "layout-cancel":
+            app.cancelLayoutApply()
         default:
             break
         }

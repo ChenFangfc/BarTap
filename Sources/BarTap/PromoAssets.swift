@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import BarTapCore
 
 /// `BarTap --export-promo-assets <dir>`: renders BarTap's real menu bar items, dropdowns and
@@ -57,6 +58,26 @@ enum PromoAssets {
         s.topCPU = apps.prefix(5).enumerated().map { ProcessUsage(pid: 100 + Int32($0.offset), name: $0.element, cpu: [2.4, 1.3, 0.6, 0.3, 0.12][$0.offset], memory: 0) }
         s.topMemory = apps.prefix(5).enumerated().map { ProcessUsage(pid: 100 + Int32($0.offset), name: $0.element, cpu: 0, memory: [2_400, 1_900, 820, 610, 420][$0.offset] * 1_048_576) }
         s.topDisk = ["Photos", "Mail", "Spotlight"].enumerated().map { ProcessUsage(pid: 200 + Int32($0.offset), name: $0.element, cpu: 0, memory: 0, diskRate: [1.8e6, 240e3, 64e3][$0.offset]) }
+        // Volume, Bluetooth, Wi-Fi, power flow and energy by app (Apple devices, made-up levels).
+        let speakers = AudioDevice(id: 1, name: "MacBook Pro Speakers", transport: 0)
+        let pods = AudioDevice(id: 2, name: "AirPods Pro", transport: kAudioDeviceTransportTypeBluetooth)
+        let mic = AudioDevice(id: 3, name: "MacBook Pro Microphone", transport: 0)
+        s.audio = AudioState(output: speakers, volume: [0.56, 0.62, 0.31, 0.75][i % 4], muted: false, canMute: true, input: mic, inputVolume: 0.62,
+                             outputs: [speakers, pods, AudioDevice(id: 4, name: "Studio Display Speakers", transport: 0)], inputs: [mic, pods])
+        s.bluetooth = BluetoothState(powered: true, devices: [
+            BluetoothDevice(name: "AirPods Pro", address: "00:00:00:00:00:01", connected: true, kind: .earbuds, left: 82, right: 79, caseBattery: 64),
+            BluetoothDevice(name: "Magic Keyboard", address: "00:00:00:00:00:02", connected: true, kind: .keyboard, battery: 64),
+            BluetoothDevice(name: "Magic Mouse", address: "00:00:00:00:00:03", connected: true, kind: .mouse, battery: 23),
+            BluetoothDevice(name: "Magic Trackpad", address: "00:00:00:00:00:04", connected: false, kind: .trackpad),
+        ])
+        s.bluetoothUpdated = promoNow
+        s.wifi = WiFiLink(rssi: -48, ssid: nil)
+        // On battery: the battery supplies what the Mac uses (12.8 V × −0.62 A, as in `battery` above).
+        s.power = PowerFlow(adapter: nil, system: 7.94, battery: -7.94, display: 2.1, source: .smc)
+        s.barWatts = -7.94
+        s.energy = [EnergyUse(key: "a", name: "Safari", watts: 1.94, processes: 8), EnergyUse(key: "b", name: "Xcode", watts: 1.21, processes: 5),
+                    EnergyUse(key: "c", name: "Music", watts: 0.42, processes: 2), EnergyUse(key: "d", name: "Mail", watts: 0.21, processes: 3),
+                    EnergyUse(key: "e", name: "Finder", watts: 0.05, processes: 1)]
         let ai = sampleAI(step: i)
         s.aiDetail = ai
         s.ai = AIDisplay.make(book: ai.book, plans: ai.plans, agents: [.claudeCode, .codex, .geminiCLI], range: .today,
@@ -168,7 +189,9 @@ enum PromoAssets {
         aiPanel.clock = { promoNow }
         let panels: [(String, StatsPanel)] = [("cpu", CPUPanel()), ("memory", MemoryPanel()), ("network", NetworkPanel()),
                                                ("sensors", SensorsPanel()), ("disk", DiskPanel()), ("battery", BatteryPanel()),
-                                               ("ai", aiPanel)]
+                                               ("ai", aiPanel), ("volume", VolumePanel(audio: nil, state: s.audio)),
+                                               ("bluetooth", BluetoothPanel(state: s.bluetooth, updated: promoNow, access: .allowed)),
+                                               ("trio", TrioPanel())]
         for (name, panel) in panels {
             panel.update(s, o)
             panel.compact()
@@ -181,7 +204,7 @@ enum PromoAssets {
 
     /// Renders a view at `scale` on a solid menu-colored background (an offscreen material view
     /// has no backdrop and renders flat gray).
-    private static func capture(_ view: NSView, dark: Bool, scale: CGFloat, to url: URL) {
+    static func capture(_ view: NSView, dark: Bool, scale: CGFloat, to url: URL) {
         let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
         let size = view.frame.size
         let back = NSView(frame: NSRect(origin: .zero, size: size))

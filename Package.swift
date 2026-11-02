@@ -20,6 +20,10 @@ let package = Package(
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("IOBluetooth"),
+                .linkedFramework("CoreBluetooth"),
             ]
         ),
         // CommandLineTools ship without XCTest, so tests are a plain executable.

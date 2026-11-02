@@ -19,26 +19,28 @@ let zh = language == "zh"
 let S: [String: String] = zh ? [
     "full": "菜单栏塞满了。", "full2": "图标越堆越多，躲到了刘海后面。",
     "fake": "很多整理工具靠伪造鼠标拖动来挪图标。", "fake2": "于是屏幕抽动，鼠标也不听使唤。",
-    "never": "BarTap 从不碰你的鼠标。", "never2": "不伪造点击，不拦截事件，每次构建都会自动检查。",
+    "never": "BarTap 从不和你抢鼠标。", "never2": "隐藏图标从不伪造点击；只有你点「应用」时才移动图标。",
     "tuck": "一条分隔线，图标就收起来了。", "tuck2": "其余什么都不动。",
     "tap": "点一下显示，再点一下收起。", "tap2": "",
     "stats": "实时系统监控，就在菜单栏里。", "stats2": "CPU · GPU · 内存 · 磁盘 · 网络 · 传感器 · 电池 · 时间，每秒刷新",
     "ai": "AI 编程用量，也一眼看清。", "ai2": "Claude Code、Codex、Gemini CLI 等：token、按 API 价折算的费用、套餐额度",
     "all": "菜单栏管理该有的，都有。", "all2": "就是不会抽动。",
     "search": "搜索任意图标", "shelf": "刘海下方的图标架", "rules": "自动规则与快捷键", "clean": "一键干净菜单栏",
-    "idle": "空闲时 CPU", "mem": "内存", "fakes": "伪造点击",
+    "arrange": "拖动排列图标", "sound": "音量与蓝牙", "power": "电池功率流向", "video": "视频下载",
+    "idle": "空闲时 CPU", "mem": "内存", "fakes": "被拦截的点击",
     "end2": "免费 · macOS 13+ · github.com/ChenFangfc/BarTap",
 ] : [
     "full": "Your menu bar is full.", "full2": "Icons pile up and vanish behind the notch.",
     "fake": "Many organizers move icons by faking mouse drags.", "fake2": "So the screen twitches and the mouse fights back.",
-    "never": "BarTap never touches your mouse.", "never2": "No fake clicks, no event taps. Checked on every build.",
+    "never": "BarTap never fights you for the mouse.", "never2": "Hiding never fakes a click. Icons move only when you click Apply.",
     "tuck": "One divider. Icons tuck away.", "tuck2": "Nothing else moves.",
     "tap": "Tap to show. Tap to hide.", "tap2": "",
     "stats": "Live system stats, right in the bar.", "stats2": "CPU · GPU · memory · disk · network · sensors · battery · time, every second",
     "ai": "Your AI coding usage, too.", "ai2": "Claude Code, Codex, Gemini CLI and more: tokens, cost at API prices, plan limits",
     "all": "Everything a menu bar manager should do.", "all2": "Without the twitching.",
     "search": "Search any icon", "shelf": "Shelf below the notch", "rules": "Rules & hotkeys", "clean": "Clean menu bar",
-    "idle": "CPU when idle", "mem": "memory", "fakes": "fake clicks",
+    "arrange": "Drag to arrange", "sound": "Volume & Bluetooth", "power": "Battery power flow", "video": "Video downloads",
+    "idle": "CPU when idle", "mem": "memory", "fakes": "clicks blocked",
     "end2": "Free · macOS 13+ · github.com/ChenFangfc/BarTap",
 ]
 
@@ -316,7 +318,7 @@ let popTimes: [Double] = {
     return out
 }()
 let itemTimes = (0..<3).map { s5 + 0.15 + 0.15 * Double($0) }
-let cardTimes = (0..<4).map { s7 + 0.3 + 0.3 * Double($0) }
+let cardTimes = (0..<8).map { s7 + 0.3 + 0.17 * Double($0) }
 let numberTimes = (0..<3).map { s8 + 0.3 * Double($0) }
 let hopTimes = Array(stride(from: s2 + 0.3, to: s3, by: 0.3))   // S2's teleporting cursor
 
@@ -460,17 +462,20 @@ func frame(_ t: Double) {
 
     // ---- S7: feature cards. --------------------------------------------------------------------
     if t >= s7, t < s8 + 0.4 {
-        let cards: [(String, String)] = [("magnifyingglass", "search"), ("rectangle.bottomthird.inset.filled", "shelf"),
-                                         ("wand.and.stars", "rules"), ("eye.slash", "clean")]
-        let cw: CGFloat = 330, ch: CGFloat = 250, gap: CGFloat = 36
-        let total = CGFloat(cards.count) * cw + CGFloat(cards.count - 1) * gap
+        let cards: [(String, String)] = [("arrow.left.and.right", "arrange"), ("magnifyingglass", "search"),
+                                         ("rectangle.bottomthird.inset.filled", "shelf"), ("wand.and.stars", "rules"),
+                                         ("speaker.wave.2", "sound"), ("powerplug", "power"),
+                                         ("arrow.down.circle", "video"), ("eye.slash", "clean")]
+        let perRow = 4
+        let cw: CGFloat = 330, ch: CGFloat = 200, gap: CGFloat = 32
+        let total = CGFloat(perRow) * cw + CGFloat(perRow - 1) * gap
         for (i, (sym, key)) in cards.enumerated() {
             let a0 = cardTimes[i]
             let p = back(prog(t, a0, a0 + 0.5))
             let a = prog(t, a0, a0 + 0.3) * (1 - prog(t, s8, s8 + 0.4))
             guard a > 0.001 else { continue }
-            let x = (W - total) / 2 + CGFloat(i) * (cw + gap)
-            let y: CGFloat = 330 + CGFloat(40 * (1 - p))
+            let x = (W - total) / 2 + CGFloat(i % perRow) * (cw + gap)
+            let y: CGFloat = 250 + CGFloat(i / perRow) * (ch + gap) + CGFloat(40 * (1 - p))
             let r = NSRect(x: x, y: y, width: cw, height: ch)
             NSGraphicsContext.saveGraphicsState()
             let shadow = NSShadow()
@@ -481,10 +486,10 @@ func frame(_ t: Double) {
             NSColor.white.withAlphaComponent(CGFloat(a)).setFill()
             NSBezierPath(roundedRect: r, xRadius: 26, yRadius: 26).fill()
             NSGraphicsContext.restoreGraphicsState()
-            let img = symbol(sym, 64)
+            let img = symbol(sym, 54)
             let iw = img.size.width, ih = img.size.height
-            drawTinted(img, in: NSRect(x: r.midX - iw / 2, y: r.minY + 62, width: iw, height: ih), color: ink, alpha: a)
-            text(S[key] ?? "", size: 27, weight: .semibold, center: CGPoint(x: r.midX, y: r.maxY - 58), alpha: a)
+            drawTinted(img, in: NSRect(x: r.midX - iw / 2, y: r.minY + 92 - ih / 2, width: iw, height: ih), color: ink, alpha: a)
+            text(S[key] ?? "", size: 27, weight: .semibold, center: CGPoint(x: r.midX, y: r.maxY - 46), alpha: a)
         }
         caption("all", "all2", t: t, a: s7 + 0.5, b: s8)
     }

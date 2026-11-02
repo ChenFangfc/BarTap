@@ -661,6 +661,85 @@ test("ai: Claude Code's cached plan usage") {
     expect(ClaudePlanCache.status(fromClaudeJSON: pretty)?.windows.first?.usedPercent == 12, "pretty-printed, as Claude Code writes it")
 }
 
+test("layout plan: from the right, each icon next to its wanted neighbour") {
+    let anchors: Set<String> = ["‖", "│", "CC", "Clock"]
+    // Already in order: nothing to do.
+    expect(LayoutPlan.nextStep(current: ["A", "‖", "B", "│", "C", "CC", "Clock"], wanted: ["A", "‖", "B", "│", "C", "CC", "Clock"], anchors: anchors) == nil)
+    // Hide C (shown → hidden) and swap A and B.
+    let current = ["A", "B", "‖", "│", "C", "D", "CC", "Clock"]
+    let wanted = ["B", "A", "‖", "C", "│", "D", "CC", "Clock"]
+    let steps = LayoutPlan.steps(current: current, wanted: wanted, anchors: anchors)
+    expect(steps == [LayoutPlan.Step(item: "C", leftOf: "│"), LayoutPlan.Step(item: "A", leftOf: "‖")], "\(steps)")
+    // Anchors never move, even when out of place.
+    expect(LayoutPlan.steps(current: ["│", "A"], wanted: ["A", "│"], anchors: anchors) == [LayoutPlan.Step(item: "A", leftOf: "│")])
+    // Icons the plan doesn't know (just appeared) stay; ones that vanished are skipped.
+    expect(LayoutPlan.steps(current: ["X", "A", "B", "CC"], wanted: ["B", "A", "Gone", "CC"], anchors: anchors)
+           == [LayoutPlan.Step(item: "A", leftOf: "CC")])
+    // An unknown icon between two that are in order doesn't cost a move.
+    expect(LayoutPlan.nextStep(current: ["A", "X", "B", "CC"], wanted: ["A", "B", "CC"], anchors: anchors) == nil)
+    // Reverse a row of five: four drags at most.
+    let five = ["A", "B", "C", "D", "E", "CC"]
+    expect(LayoutPlan.steps(current: five, wanted: ["E", "D", "C", "B", "A", "CC"], anchors: anchors).count == 4)
+}
+
+test("layout rows: drag between rows, reorder, nearest end, merge") {
+    var a = LayoutArrangement(shown: ["S1", "S2"], hidden: ["H1", "H2", "H3"], always: [], pinned: ["CC", "Clock"])
+    // Within a row, an index counts the icons before the move.
+    a.move("H1", to: .hidden, at: 3)
+    expect(a.hidden == ["H2", "H3", "H1"], "\(a.hidden)")
+    a.move("H1", to: .hidden, at: 0)
+    expect(a.hidden == ["H1", "H2", "H3"])
+    a.move("S2", to: .hidden, at: 1)
+    expect(a.hidden == ["H1", "S2", "H2", "H3"] && a.shown == ["S1"])
+    // Out-of-range indexes clamp; pinned icons never move.
+    a.move("H3", to: .shown, at: 99)
+    expect(a.shown == ["S1", "H3"])
+    a.move("CC", to: .hidden, at: 0)
+    expect(a.pinned == ["CC", "Clock"] && a.row(of: "CC") == nil)
+    // Sending goes to the end nearest the row it came from.
+    a.send("H1", to: .shown)
+    expect(a.shown.first == "H1")
+    a.send("S1", to: .hidden)
+    expect(a.hidden.last == "S1")
+    a.send("H2", to: .always)
+    expect(a.always == ["H2"])
+    a.send("S1", to: .always)
+    expect(a.always == ["H2", "S1"])
+    a.send("H2", to: .hidden)
+    expect(a.hidden.first == "H2")
+    expect(a.order(alwaysSection: true) == ["S1", "‖", "H2", "S2", "│", "H1", "H3", "CC", "Clock"], "\(a.order(alwaysSection: true))")
+    expect(a.order(alwaysSection: false) == ["S1", "H2", "S2", "│", "H1", "H3", "CC", "Clock"])
+    // Merging edits into a changed bar: gone icons drop out, new ones land where they appeared.
+    let edits = LayoutArrangement(shown: ["B", "A"], hidden: ["C"], always: [], pinned: ["CC"])
+    let live = LayoutArrangement(shown: ["A", "N", "B"], hidden: [], always: [], pinned: ["CC"])
+    let m = edits.merged(into: live)
+    expect(m.shown == ["B", "A", "N"] && m.hidden == [] && m.pinned == ["CC"], "\(m)")
+    // The plan for those edits, with BarTap's dividers and pinned icons as anchors.
+    let steps = LayoutPlan.steps(current: live.order(alwaysSection: false), wanted: m.order(alwaysSection: false), anchors: ["│", "CC"])
+    expect(steps == [LayoutPlan.Step(item: "N", leftOf: "CC"), LayoutPlan.Step(item: "A", leftOf: "N")], "\(steps)")
+}
+
+test("short rows: a display too narrow for every shown icon is named, others not") {
+    // Collapsed: BarTap's long divider, then the shown run up to the right edge; `undrawn` icons at
+    // its left end don't fit.
+    func bar(_ s: ScreenInfo, _ run: [CGFloat], undrawn: Int = 0) -> [WindowInfo] {
+        var x = s.frame.maxX - run.reduce(0, +)
+        var out = [statusWindow(x - 10000, 10000, on: s)]
+        for (i, w) in run.enumerated() {
+            out.append(statusWindow(x, w, on: s, drawn: i >= undrawn))
+            x += w
+        }
+        return out
+    }
+    let run: [CGFloat] = [31, 47, 60, 218, 76, 42, 135]
+    expect(MenuBarGeometry.shortRows(screens: [external, portrait], windows: bar(external, run) + bar(portrait, run)).isEmpty,
+           "same icons everywhere")
+    let short = MenuBarGeometry.shortRows(screens: [external, builtIn], windows: bar(external, run) + bar(builtIn, run, undrawn: 2))
+    expect(short.count == 1 && short.first?.screen == builtIn && short.first?.missing == 2, "\(short)")
+    // A display whose bar isn't drawn (full screen) is not short.
+    expect(MenuBarGeometry.shortRows(screens: [external, portrait], windows: bar(external, run)).isEmpty)
+}
+
 test("own run: BarTap's items found by width in the window list") {
     let screen = ScreenInfo(id: 9, frame: CGRect(x: 0, y: -1692, width: 3008, height: 1692), menuBarHeight: 30)
     // Right to left as macOS lays them out: clock, Control Center, Battery, stats (ai … cpu), toggle, │, Wi-Fi, input, ‖, LogiMos.
@@ -806,6 +885,9 @@ test("stats: clock formats") {
     expect(!ClockFormat.showsSeconds("'s' HH:mm"), "quoted literals are not seconds")
     expect(ClockFormat.presets.contains("EEE HH:mm"))
 }
+
+runTrioTests()
+runVideoDownloadTests()
 
 print("\n\(checks) checks, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

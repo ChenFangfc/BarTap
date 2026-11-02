@@ -156,8 +156,14 @@ final class AXCatalog {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.2)
         var barRef: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &barRef)
-        if err == .cannotComplete { return ([], true) }
+        var err = AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &barRef)
+        if err == .cannotComplete {
+            // Busy rather than hung (iStat Menus redraws every second): one more, longer try before
+            // its icons are left out for a while.
+            AXUIElementSetMessagingTimeout(app, 0.6)
+            err = AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &barRef)
+            if err == .cannotComplete { return ([], true) }
+        }
         guard err == .success, let barRef, CFGetTypeID(barRef) == AXUIElementGetTypeID() else { return ([], false) }
         let bar = barRef as! AXUIElement
         var childrenRef: CFTypeRef?

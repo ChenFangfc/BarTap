@@ -98,6 +98,13 @@ enum JitterCheck {
             s.sensors = SensorReadings(cpu: 20 + f * 90, cpuMax: nil, gpu: nil, battery: nil, storage: nil, ambient: nil,
                                        fans: [FanReading(rpm: f * 9000, min: 0, max: 9000)], systemPower: f * 150)
             s.battery = BatteryInfo(percent: Int(f * 100), charging: f < 0.5, onAC: true, charged: false, minutesRemaining: Int(f * 5999))
+            s.power = PowerFlow(adapter: f * 140, system: f * 90, battery: (f - 0.5) * 190, source: .smc)
+            s.barWatts = (f - 0.5) * 370
+            s.audio = AudioState(output: AudioDevice(id: 1, name: "Out", transport: 0), volume: f, muted: f > 0.9, canMute: true)
+            s.bluetooth = BluetoothState(powered: f > 0.1, devices: (0..<Int(f * 12)).map {
+                BluetoothDevice(name: "D\($0)", address: "\($0)", connected: true, kind: .earbuds, left: Int(f * 100), right: $0 * 9 % 101)
+            })
+            s.wifi = WiFiLink(rssi: f > 0.1 ? -40 - Int(f * 50) : nil, ssid: nil)
             return s
         }
     }

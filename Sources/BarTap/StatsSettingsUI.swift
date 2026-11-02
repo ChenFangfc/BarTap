@@ -14,6 +14,9 @@ enum StatsNames {
         case .battery: return L("Battery")
         case .time: return L("Time")
         case .ai: return L("AI usage")
+        case .volume: return L("Volume")
+        case .bluetooth: return L("Bluetooth")
+        case .trio: return L("3-in-1 status")
         }
     }
 
@@ -25,7 +28,7 @@ enum StatsNames {
         case .bar: return L("Bar")
         case .pie: return L("Pie")
         case .ring: return L("Ring")
-        case .percent: return L("Percentage")
+        case .percent: return m == .trio ? L("Battery percentage") : L("Percentage")
         case .cores: return L("Per-core bars")
         case .usedFree: return L("Used / free (U: F:)")
         case .used: return L("Used amount")
@@ -46,6 +49,13 @@ enum StatsNames {
         case .aiPlanPercent: return L("Plan usage %")
         case .aiPlanTwo: return L("Plan windows (5h / 7d)")
         case .aiCredits: return L("Usage credits (ring + amount)")
+        case .batteryPower: return L("Charge / discharge rate (±W)")
+        case .speaker: return L("Speaker icon (shows the level)")
+        case .levelMeter: return L("Level meter")
+        case .bluetoothIcon: return L("Bluetooth icon + connected count")
+        case .lowestBattery: return L("Lowest battery of connected devices")
+        case .airPods: return L("AirPods left / right (two lines)")
+        case .trio: return L("Battery, Wi-Fi and volume in one icon")
         }
     }
 
@@ -78,6 +88,11 @@ enum StatsNames {
         case .aiPlanPercent: return L("Plan %")
         case .aiPlanTwo: return "5h/7d"
         case .aiCredits: return L("Credits")
+        case .batteryPower: return "±W"
+        case .speaker, .bluetoothIcon, .trio: return L("Icon")
+        case .levelMeter: return L("Meter")
+        case .lowestBattery: return L("Lowest")
+        case .airPods: return "L/R"
         }
     }
 

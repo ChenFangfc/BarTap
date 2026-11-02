@@ -71,6 +71,9 @@ public final class Settings {
         "ruleLowBatteryPercent": 20,
         "ruleOffline": false,
         "debugCommands": false,
+        "videoDownloadsEnabled": true,
+        "videoPreset": VideoPreset.best.rawValue,
+        "videoPlaylists": false,
         "hotkey.toggle": "11:\(KeyCombo.control | KeyCombo.option | KeyCombo.cmd)",   // ⌃⌥⌘B
         "hotkey.search": "3:\(KeyCombo.control | KeyCombo.option | KeyCombo.cmd)",    // ⌃⌥⌘F
     ]
@@ -129,6 +132,19 @@ public final class Settings {
     }
     public var colorFormat: String { get { string("colorFormat") } set { setString("colorFormat", newValue) } }
     public var debugCommands: Bool { get { bool("debugCommands") } set { setBool("debugCommands", newValue) } }
+
+    // MARK: Video downloads
+    /// Shows "Download Video…" in BarTap's menu.
+    public var videoDownloadsEnabled: Bool { get { bool("videoDownloadsEnabled") } set { setBool("videoDownloadsEnabled", newValue) } }
+    /// Empty: ~/Downloads.
+    public var videoFolder: String { get { string("videoFolder") } set { setString("videoFolder", newValue) } }
+    public var videoPreset: VideoPreset {
+        get { VideoPreset(rawValue: string("videoPreset")) ?? .best }
+        set { setString("videoPreset", newValue.rawValue) }
+    }
+    public var videoPlaylists: Bool { get { bool("videoPlaylists") } set { setBool("videoPlaylists", newValue) } }
+    /// A yt-dlp the user picked; empty: find one automatically.
+    public var videoToolPath: String { get { string("videoToolPath") } set { setString("videoToolPath", newValue) } }
 
     // MARK: Placement bookkeeping
     public var didPlaceItems: Bool { get { bool("didPlaceItems") } set { defaults.set(newValue, forKey: "didPlaceItems") } }

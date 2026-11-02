@@ -4,7 +4,7 @@
 
 # BarTap
 
-**A tidy menu bar, live system stats and your AI coding usage, in one small macOS app that never touches your mouse.**
+**A tidy menu bar, live system stats and your AI coding usage, in one small macOS app that never fights you for the mouse.**
 
 <a href="https://github.com/ChenFangfc/BarTap/releases/latest/download/BarTap.dmg"><img src="https://img.shields.io/badge/download-BarTap.dmg-2B2B2E?style=flat-square&logo=apple&logoColor=white" alt="Download BarTap.dmg"></a>
 <img src="https://img.shields.io/badge/macOS-13%2B-555?style=flat-square" alt="macOS 13 or later">
@@ -23,7 +23,7 @@
 
 ---
 
-BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GPU, memory, disk, network, sensors, battery and a clock live in the bar, and shows how much your AI coding agents have used. It does this without fake clicks, event taps or cursor warps, so the screen never twitches and the mouse stays yours.
+BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GPU, memory, disk, network, sensors, battery and a clock live in the bar, and shows how much your AI coding agents have used. Hiding never fakes a click, taps your input or warps the cursor, so the screen never twitches. Icons move only when you ask: arrange them in Settings › Layout, click Apply, and BarTap makes the ⌘-drags for you, stopping the moment you touch the mouse.
 
 ## Features
 
@@ -36,16 +36,25 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - Hide icons behind the toggle. An optional ‖ section keeps some hidden for good.
 - Reveal them with a click, hover, scroll or hotkey (⌃⌥⌘B). They re-hide on their own.
 - On a notched Mac, a click can open the shelf: a Bartender-style dropdown with the hidden icons, real images included. Click one to open its menu.
-- See your whole menu bar in **Settings › Layout**, real icons in their real order, and drag │ to choose which are hidden.
+- Arrange the whole menu bar in **Settings › Layout**: real icons in rows for Shown, Hidden and Always Hidden. Drag icons between the rows and along them, then click Apply.
+- One arrangement for every display: a wide screen hides exactly what a narrow one hides. If a display is too narrow for every shown icon, Settings › Layout names it.
 - Search any menu bar icon (⌃⌥⌘F).
 - Rules reveal icons on a large display, in chosen apps, on low battery or when you're offline.
 - Clean menu bar for screenshots, tighter icon spacing, Keep Awake and a color picker.
 
 **Monitor**
-- Eight modules, refreshed every second. Build each item from elements in any order (graph, bar, pie, ring, percentage, U:/F:, R:/W:, ↑↓, label…), or pick a preset. Reorder the items too.
+- Eleven modules, refreshed every second. Build each item from elements in any order (graph, bar, pie, ring, percentage, U:/F:, R:/W:, ↑↓, label…), or pick a preset. Reorder the items too.
+- **Volume**: level and mute in the bar, scroll on it to change the volume, switch output and input devices from its dropdown.
+- **Bluetooth**: paired devices and their batteries (AirPods left, right and case too); connect or disconnect with one click.
+- **3-in-1**: battery, Wi-Fi and volume in one small icon.
+- **Battery power flow**: adapter, Mac and battery in watts, plus health, cycles and which apps use the energy.
 - Dropdowns with history graphs, per-core load, top processes, Wi-Fi details, daily and monthly data use, temperatures, fans, power, battery health and Bluetooth device batteries.
 - Alerts for a lost connection, a full battery, high CPU or heat, memory pressure, a low disk and a low battery.
 - World clocks, a calendar, °F and bits. Combine all stats into one item to save space by the notch.
+
+**Video downloads**
+- Paste a link to download a video or its audio from YouTube and the many other sites [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports. Pick Best, 1080p, 720p, audio only or MP3; watch the progress; open the file in Finder.
+- BarTap uses yt-dlp from Homebrew, or fetches its official release from GitHub (checksum verified) when you ask. Download only videos you have the right to.
 
 **AI usage**
 - Tokens and cost of Claude Code, Codex, Gemini CLI, OpenCode, Kilo Code, Qwen Code and Kimi Code, read from their logs on your Mac. No API keys, no sign-in, nothing uploaded.
@@ -63,23 +72,28 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
   <img src="docs/media/panels-light.webp" width="100%" alt="The CPU, network and AI usage dropdowns">
 </picture>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/panels2-dark.webp">
+  <img src="docs/media/panels2-light.webp" width="100%" alt="The battery dropdown with power flow and energy by app, the Bluetooth dropdown, and the volume dropdown">
+</picture>
+
 ## Install
 
 1. [Download BarTap.dmg](https://github.com/ChenFangfc/BarTap/releases/latest/download/BarTap.dmg), open it and drag BarTap to Applications.
 2. BarTap is self-signed, not notarized. If macOS blocks the first launch, open **System Settings › Privacy & Security** and click **Open Anyway**. You only do this once.
-3. Hold ⌘ and drag icons left of the │ divider to hide them. Turn on stats and AI usage in **Settings › Stats**.
+3. Choose what to hide in **Settings › Layout** (or hold ⌘ and drag icons left of the │ divider yourself). Turn on stats and AI usage in **Settings › Stats**.
 
-Hiding and AI usage need no permission. Two optional ones: **Accessibility** enables the shelf, search and Settings › Layout, and **Screen Recording** shows real icons there. Both stay granted when you update. Quit any other menu bar manager first.
+Hiding and AI usage need no permission. Two optional ones: **Accessibility** enables the shelf, search and Settings › Layout (including Apply, which moves icons for you), and **Screen Recording** shows real icons there. Both stay granted when you update. Quit any other menu bar manager first.
 
 ## Why it can't twitch
 
-Organizers that move icons for you do it by posting synthetic ⌘-drags, sometimes while freezing or warping the cursor. When macOS lags, those events land in the wrong place: the screen jumps and the mouse fights back.
+Organizers that move icons for you post synthetic ⌘-drags in the background, sometimes while freezing or warping the cursor. When macOS lags, those events land in the wrong place: the screen jumps and the mouse fights back.
 
-BarTap only changes the length of its own divider items. It never posts input events, installs event taps or moves the pointer, and [`scripts/build.sh`](scripts/build.sh) fails the build if the binary links any API that could. You arrange icons yourself with ⌘-drag, the way macOS intends. Quit BarTap and every icon comes straight back.
+Hiding in BarTap only changes the length of its own divider items: no input events, no event taps, no cursor warps. Icons move only when you click **Apply** in Settings › Layout. BarTap then makes one ⌘-drag per icon, as you would, with the pointer hidden and put back afterwards. It reads the menu bar again after every move and stops for good the moment you touch the mouse or keyboard. It never freezes the pointer, never blocks a click and never moves anything on its own. [`scripts/build.sh`](scripts/build.sh) fails the build if the binary links an event tap, cursor warp, input suppression or keyboard event API, or if mouse events are created anywhere but that one Apply path. Quit BarTap and every icon comes straight back.
 
 ## Light by design
 
-Idle, BarTap uses about **0.02% CPU** and **~40 MB** of memory. Four live stats refreshed every second add **1–3% CPU**, depending on how many displays draw the menu bar (macOS redraws each changed item on every one). Unchanged readouts are never redrawn, and details and process lists are sampled only while a dropdown is open. AI usage reads only the lines an agent adds, a few seconds after it writes them; the first pass over a long history takes seconds (7 GB of logs: about 11 s). There is no daemon and no root helper. The only network requests are the public IP lookup, if you turn it on, and a weekly download of the public model price list while AI usage is on (you can turn that off).
+Idle, BarTap uses about **0.02% CPU** and **~40 MB** of memory. Four live stats refreshed every second add **1–3% CPU**, depending on how many displays draw the menu bar (macOS redraws each changed item on every one). Unchanged readouts are never redrawn, and details and process lists are sampled only while a dropdown is open. AI usage reads only the lines an agent adds, a few seconds after it writes them; the first pass over a long history takes seconds (7 GB of logs: about 11 s). There is no daemon and no root helper. The only network requests are the public IP lookup, if you turn it on, a weekly download of the public model price list while AI usage is on (you can turn that off), and the video downloads you start (plus yt-dlp's official release, when you install or update it).
 
 <sub>Measured on a MacBook Pro (M2 Max) running macOS 26.</sub>
 

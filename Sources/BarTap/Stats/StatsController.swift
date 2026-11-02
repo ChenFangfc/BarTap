@@ -71,6 +71,11 @@ final class StatsController: NSObject, NSMenuDelegate {
     private var pathMonitor: NWPathMonitor?
     private var lastOnline: Bool?
     private var lastCharged: Bool?
+    /// Volume and 3-in-1 items: CoreAudio listeners, only while one of them is on.
+    private var audio: AudioMonitor?
+    /// Bluetooth item: paired devices and batteries, only while it is on.
+    private var bluetooth: BluetoothMonitor?
+    private var scrollMonitor: Any?
 
     /// Persist data-usage counters and AI usage sums (on quit).
     func flush() {
@@ -190,7 +195,16 @@ final class StatsController: NSObject, NSMenuDelegate {
         configureNetworkAlert(a.networkEnabled)
         configureAI(wanted.contains(.ai))
         if aiSnapshot != nil { recomputeAI() }
+        let soundShown = wanted.contains(.volume) || wanted.contains(.trio)
+        configureAudio(soundShown)
+        configureScroll(soundShown)
+        let bluetoothElements = settings.statsElements(.bluetooth)
+        configureBluetooth(wanted.contains(.bluetooth),
+                           batteryShown: bluetoothElements.contains(.lowestBattery) || bluetoothElements.contains(.airPods))
         needed.remove(.ai)   // not sampled by the stats engine
+        needed.remove(.volume)      // event-driven (AudioMonitor)
+        needed.remove(.bluetooth)   // its own schedule (BluetoothMonitor)
+        engine.setPowerInBar(wanted.contains(.battery) && settings.statsElements(.battery).contains(.batteryPower))
         engine.configure(modules: needed, interval: settings.statsInterval)
         invalidateDrawn()   // items may be new: draw everything once
         render()
@@ -259,6 +273,9 @@ final class StatsController: NSObject, NSMenuDelegate {
         var s = s
         s.ai = aiDisplay
         s.aiDetail = aiSnapshot
+        s.audio = audio?.state
+        s.bluetooth = bluetooth?.state
+        s.bluetoothUpdated = bluetooth?.updated
         last = s
         if aiSnapshot != nil, AIUsageBook.dayKey(Date(), calendar: .current) != aiDay { recomputeAI() }
         let started = CFAbsoluteTimeGetCurrent()
@@ -319,6 +336,117 @@ final class StatsController: NSObject, NSMenuDelegate {
     /// Forget drawn signatures (appearance or settings changed) so everything redraws once.
     func invalidateDrawn() { drawn.removeAll() }
 
+    // MARK: Volume, Bluetooth, 3-in-1
+
+    private func configureAudio(_ on: Bool) {
+        if on, audio == nil {
+            let a = AudioMonitor()
+            a.onChange = { [weak self] state in self?.audioChanged(state) }
+            audio = a
+            a.start()
+        } else if !on, let a = audio {
+            a.stop()
+            audio = nil
+            last?.audio = nil
+        }
+    }
+
+    private func configureBluetooth(_ on: Bool, batteryShown: Bool) {
+        if on, bluetooth == nil {
+            let b = BluetoothMonitor()
+            b.onChange = { [weak self] state, date in self?.bluetoothChanged(state, date) }
+            bluetooth = b
+            b.start()
+        } else if !on, let b = bluetooth {
+            b.stop()
+            bluetooth = nil
+            last?.bluetooth = nil
+        }
+        bluetooth?.periodic = batteryShown
+    }
+
+    /// Volume and Bluetooth arrive between engine ticks (and with no engine running at all).
+    private func audioChanged(_ state: AudioState) {
+        if last == nil { last = StatsSnapshot() }
+        last?.audio = state
+        render()
+        guard let s = last else { return }
+        for (m, panel) in openPanels where m == .volume || m == .trio { panel.update(s, options) }
+    }
+
+    private func bluetoothChanged(_ state: BluetoothState, _ date: Date) {
+        if last == nil { last = StatsSnapshot() }
+        last?.bluetooth = state
+        last?.bluetoothUpdated = date
+        render()
+        guard let s = last else { return }
+        openPanels[.bluetooth]?.update(s, options)
+    }
+
+    /// Scrolling over the Volume or 3-in-1 item changes the volume. A local monitor sees only
+    /// events sent to BarTap itself, and only those over these items are used (and consumed).
+    private func configureScroll(_ on: Bool) {
+        if on, scrollMonitor == nil {
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] e in
+                guard let self, let audio = self.audio, self.isOverSoundItem(e) else { return e }
+                // Momentum after the fingers lift would overshoot.
+                if e.momentumPhase.isEmpty {
+                    let delta = VolumeMath.scrollDelta(deltaY: Double(e.scrollingDeltaY), precise: e.hasPreciseScrollingDeltas,
+                                                       inverted: e.isDirectionInvertedFromDevice)
+                    if delta != 0 { audio.adjustVolume(by: delta) }
+                }
+                return nil
+            }
+        } else if !on, let m = scrollMonitor {
+            NSEvent.removeMonitor(m)
+            scrollMonitor = nil
+        }
+    }
+
+    private func isOverSoundItem(_ e: NSEvent) -> Bool {
+        var windows = [items[.volume], items[.trio]].compactMap { $0?.button?.window }
+        if let c = combinedItem?.button?.window, settings.statsModules.contains(where: { $0 == .volume || $0 == .trio }) { windows.append(c) }
+        if let w = e.window { return windows.contains { $0 === w } }
+        // A window-less event (not expected): go by where the pointer is.
+        let p = NSEvent.mouseLocation
+        return windows.contains { $0.frame.contains(p) }
+    }
+
+    @objc private func toggleMute() { audio?.toggleMute() }
+
+    private static func openSettingsPane(_ id: String) {
+        if let url = URL(string: "x-apple.systempreferences:" + id) { NSWorkspace.shared.open(url) }
+    }
+
+    @objc private func openSoundSettings() { Self.openSettingsPane("com.apple.Sound-Settings.extension") }
+    @objc private func openWiFiSettings() { Self.openSettingsPane("com.apple.wifi-settings-extension") }
+    @objc private func openBatterySettings() { Self.openSettingsPane("com.apple.Battery-Settings.extension") }
+    @objc private func openBluetoothSettings() { Self.openSettingsPane("com.apple.BluetoothSettings") }
+
+    /// - Parameter done: success, or nil when the person cancelled.
+    private func setBluetoothConnected(_ d: BluetoothDevice, _ on: Bool, _ done: @escaping (Bool?) -> Void) {
+        let perform = { [weak self] in
+            BluetoothControl.shared.setConnected(on, address: d.address) { ok in
+                done(ok)
+                // The connection settles over a second or two; read the devices again after it.
+                self?.bluetooth?.refresh(after: ok ? 2 : 0.5)
+            }
+        }
+        guard !on, [.mouse, .keyboard, .trackpad, .gamepad].contains(d.kind) else { perform(); return }
+        // Disconnecting an input device can leave the Mac without a keyboard or pointer: ask
+        // first, outside the menu.
+        openPanels[.bluetooth]?.enclosingMenuItem?.menu?.cancelTracking()
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = L("Disconnect %@?", d.name)
+            alert.informativeText = L("If it's your only keyboard or pointing device, you can't use it until it connects again.")
+            alert.addButton(withTitle: L("Disconnect"))
+            alert.addButton(withTitle: L("Cancel"))
+            if alert.runModal() == .alertFirstButtonReturn { perform() } else { done(nil) }
+        }
+    }
+
     // MARK: Menus
 
     private func module(for menu: NSMenu) -> StatsModule? {
@@ -370,15 +498,39 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .battery: return L("Battery")
         case .time: return L("Time")
         case .ai: return L("AI usage")
+        case .volume: return L("Volume")
+        case .bluetooth: return L("Bluetooth")
+        case .trio: return L("3-in-1 status")
         }
     }
 
     private func appendFooter(to menu: NSMenu, module: StatsModule? = nil) {
         menu.addItem(.separator())
         if module == .disk { appendEjectItems(to: menu) }
-        let monitor = NSMenuItem(title: L("Open Activity Monitor"), action: #selector(openActivityMonitor), keyEquivalent: "")
-        monitor.target = self
-        menu.addItem(monitor)
+        func add(_ title: String, _ action: Selector) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        switch module {
+        case .volume:
+            add(L("Sound Settings…"), #selector(openSoundSettings))
+        case .bluetooth:
+            add(L("Bluetooth Settings…"), #selector(openBluetoothSettings))
+        case .trio:
+            // Quick actions.
+            add(audio?.state?.muted == true ? L("Unmute") : L("Mute"), #selector(toggleMute))
+            menu.items.last?.isEnabled = audio?.state?.canMute == true
+            menu.addItem(.separator())
+            add(L("Wi-Fi Settings…"), #selector(openWiFiSettings))
+            add(L("Sound Settings…"), #selector(openSoundSettings))
+            add(L("Battery Settings…"), #selector(openBatterySettings))
+        case .battery:
+            add(L("Open Activity Monitor"), #selector(openActivityMonitor))
+            add(L("Battery Settings…"), #selector(openBatterySettings))
+        default:
+            add(L("Open Activity Monitor"), #selector(openActivityMonitor))
+        }
         let prefs = NSMenuItem(title: L("Stats Settings…"), action: #selector(openStatsSettings), keyEquivalent: "")
         prefs.target = self
         menu.addItem(prefs)
@@ -395,6 +547,12 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .battery: return BatteryPanel()
         case .time: return TimePanel(worldClocks: settings.worldClocks)
         case .ai: return AIPanel(settings: settings, prices: aiPrices, agents: aiAgentsShown())
+        case .volume: return VolumePanel(audio: audio, state: audio?.state)
+        case .bluetooth:
+            let p = BluetoothPanel(state: bluetooth?.state, updated: bluetooth?.updated, access: BluetoothControl.access)
+            p.onSetConnected = { [weak self] d, on, done in self?.setBluetoothConnected(d, on, done) }
+            return p
+        case .trio: return TrioPanel()
         }
     }
 
@@ -459,13 +617,14 @@ final class StatsController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard let m = module(for: menu) ?? submenuModule(menu) else { return }
         openMenus += 1
-        engine.setDetail(m, true)
+        // Volume updates by itself (CoreAudio events); Bluetooth reads on its own schedule.
+        if m == .bluetooth { bluetooth?.setDetail(true) } else if m != .volume { engine.setDetail(m, true) }
     }
 
     func menuDidClose(_ menu: NSMenu) {
         guard let m = module(for: menu) ?? submenuModule(menu) else { return }
         openMenus = max(0, openMenus - 1)
-        engine.setDetail(m, false)
+        if m == .bluetooth { bluetooth?.setDetail(false) } else if m != .volume { engine.setDetail(m, false) }
         // Drop the panel so a closed dropdown costs nothing.
         openPanels[m] = nil
         DispatchQueue.main.async { menu.removeAllItems() }
@@ -575,6 +734,13 @@ final class StatsController: NSObject, NSMenuDelegate {
             "fans": last?.sensors?.fans.map(\.rpm) ?? [],
             "volumes": last?.volumes.map(\.name) ?? [],
             "battery": last?.battery?.percent ?? -1,
+            "batteryWatts": last?.power?.battery ?? -999,
+            "audio": ["running": audio != nil, "volume": last?.audio?.volume ?? -1, "muted": last?.audio?.muted ?? false,
+                      "outputs": last?.audio?.outputs.count ?? -1, "scrollMonitor": scrollMonitor != nil] as [String: Any],
+            "bluetooth": ["running": bluetooth != nil, "connected": last?.bluetooth?.connected.count ?? -1,
+                          "devices": last?.bluetooth?.devices.count ?? -1,
+                          "age": bluetooth?.updated.map { Date().timeIntervalSince($0) } ?? -1] as [String: Any],
+            "wifiBars": last?.wifi?.bars ?? -1,
             "openPanels": openPanels.count,
             "ai": [
                 "running": aiEngine != nil,
@@ -617,9 +783,9 @@ final class StatsController: NSObject, NSMenuDelegate {
         let panel = makePanel(m)
         if let last { panel.update(last, options) }
         openPanels[m] = panel
-        engine.setDetail(m, true)
+        if m == .bluetooth { bluetooth?.setDetail(true) } else if m != .volume { engine.setDetail(m, true) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            self?.engine.setDetail(m, false)
+            if m == .bluetooth { self?.bluetooth?.setDetail(false) } else if m != .volume { self?.engine.setDetail(m, false) }
             self?.openPanels[m] = nil
         }
     }

@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
-VERSION="${VERSION:-1.2.0}"
+VERSION="${VERSION:-1.3.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 DIST=dist
 APP="$DIST/BarTap.app"
@@ -46,16 +46,22 @@ mkdir -p "$WORK"
 lipo -create -output "$WORK/BarTap" "${BINS[@]}"
 lipo -info "$WORK/BarTap"
 
-echo "==> Safety check: no input-synthesis / pointer / event-tap APIs"
-FORBIDDEN='_CGEventPost|_CGEventPostToPid|_CGEventPostToPSN|_CGEventTapCreate|_CGEventTapCreateForPid|_CGEventTapCreateForPSN|_CGWarpMouseCursorPosition|_CGAssociateMouseAndMouseCursorPosition|_CGEventSourceSetLocalEventsSuppressionInterval|_CGEventSourceSetLocalEventsFilterDuringSuppressionState|_CGSetLocalEventsSuppressionInterval|_CGEventCreateMouseEvent|_CGEventCreateKeyboardEvent|_CGEventCreateScrollWheelEvent|_CGEventCreateScrollWheelEvent2|_CGPostMouseEvent|_CGPostKeyboardEvent|_CGPostScrollWheelEvent|_CGDisplayHideCursor|_CGDisplayMoveCursorToPoint|_AXUIElementPostKeyboardEvent|_SLSPostEvent|_CGSPostEvent'
+echo "==> Safety check: no event taps, pointer warps, input suppression or keyboard/scroll events"
+# Mouse events are allowed for one job only: moving icons when the user clicks Apply in
+# Settings › Layout (IconMover.swift). Everything that could take the mouse away from the user stays out.
+FORBIDDEN='_CGWarpMouseCursorPosition|_CGEventPostToPSN|_CGEventTapCreate|_CGEventTapCreateForPid|_CGEventTapCreateForPSN|_CGAssociateMouseAndMouseCursorPosition|_CGEventSourceSetLocalEventsSuppressionInterval|_CGEventSourceSetLocalEventsFilterDuringSuppressionState|_CGSetLocalEventsSuppressionInterval|_CGEventCreateKeyboardEvent|_CGEventCreateScrollWheelEvent|_CGEventCreateScrollWheelEvent2|_CGPostMouseEvent|_CGPostKeyboardEvent|_CGPostScrollWheelEvent|_CGDisplayMoveCursorToPoint|_AXUIElementPostKeyboardEvent|_SLSPostEvent|_CGSPostEvent'
 for arch in arm64 x86_64; do
     if nm -u -arch "$arch" "$WORK/BarTap" | grep -E "^($FORBIDDEN)\$"; then
         echo "FAIL: forbidden symbol linked ($arch)"; exit 1
     fi
 done
 # No sneaking them in through dlsym either.
-if strings -a "$WORK/BarTap" | grep -E "CGEventPost|CGWarpMouse|CGEventTapCreate|CGAssociateMouse|SuppressionInterval"; then
+if strings -a "$WORK/BarTap" | grep -E "CGEventTapCreate|CGAssociateMouse|CGWarpMouse|SuppressionInterval|CGPostKeyboard|CGEventCreateKeyboard"; then
     echo "FAIL: forbidden API name found in binary strings"; exit 1
+fi
+# Mouse events and pointer moves come from one file, used only by Apply.
+if grep -rlE "CGEvent\(mouseEventSource|\.post\(tap|CGDisplayHideCursor" Sources | grep -v "Sources/BarTap/IconMover.swift"; then
+    echo "FAIL: mouse events created outside IconMover.swift"; exit 1
 fi
 echo "    ok"
 
@@ -77,6 +83,8 @@ cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp Resources/ai-prices.json "$APP/Contents/Resources/ai-prices.json"   # bundled model prices (LiteLLM snapshot)
 echo '"CFBundleDisplayName" = "BarTap";' > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 echo '"CFBundleDisplayName" = "BarTap";' > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
+# The Bluetooth permission prompt (Connect / Disconnect in the Bluetooth stats menu), in Chinese.
+echo '"NSBluetoothAlwaysUsageDescription" = "只有在你点按 BarTap 蓝牙菜单中的「连接」或「断开」时，BarTap 才会使用蓝牙来连接或断开那台已配对的设备。";' >> "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
 
 # A stable identity keeps privacy grants (Accessibility, Screen Recording) across rebuilds: macOS
 # ties them to the signature, and an ad-hoc signature is just this exact binary's hash.

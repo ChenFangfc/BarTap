@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import BarTapCore
 
 struct FanReading: Equatable {
@@ -61,6 +62,21 @@ struct StatsSnapshot {
     var ai: AIDisplay?
     /// The AI reader's sums and plan limits, for the dropdown.
     var aiDetail: AIUsageEngine.Snapshot?
+    /// Default audio devices, volume and mute (event-driven, from AudioMonitor).
+    var audio: AudioState?
+    /// Paired Bluetooth devices (BluetoothMonitor) and when they were read.
+    var bluetooth: BluetoothState?
+    var bluetoothUpdated: Date?
+    /// Wi-Fi signal for the 3-in-1 item.
+    var wifi: WiFiLink?
+    /// Battery power flow (dropdown, or the menu bar's charge/discharge rate).
+    var power: PowerFlow?
+    /// The charge/discharge rate the menu bar shows (smoothed; see PowerFlowMath.smoothed).
+    var barWatts: Double?
+    /// Apps by energy while the battery dropdown is open (nil: not sampled).
+    var energy: [EnergyUse]?
+    /// The first sample after opening has nothing to compare with yet.
+    var energyMeasuring = false
 }
 
 /// Samples system metrics on a private utility queue with one coalesced timer. Only what is
@@ -96,6 +112,13 @@ final class StatsEngine {
     private var lastVolumes: [VolumeInfo] = []
     private var lastVolumeTime: TimeInterval = 0
     private let processes = ProcessReader()
+    private let energy = EnergyReader()
+    private var powerInBar = false
+    private var barWatts: Double?
+    private var wifi: WiFiLink?
+    private var wifiReadAt: TimeInterval = 0
+    private var wifiStale = true
+    private var wifiPath: NWPathMonitor?
     private let coreLayout = CPUReader.coreLayout()
     private let netDetails = NetworkDetailsReader()
     private var prevPages: (ins: UInt64, outs: UInt64, t: TimeInterval)?
@@ -133,8 +156,33 @@ final class StatsEngine {
             let changed = modules != self.needed || interval != self.interval
             self.needed = modules
             self.interval = interval
+            self.watchWiFi(modules.contains(.trio))
             if changed { self.reschedule(primeNow: true) }
         }
+    }
+
+    /// The battery item shows its charge/discharge rate: read the power flow every tick.
+    func setPowerInBar(_ on: Bool) {
+        queue.async {
+            self.powerInBar = on
+            if !on { self.barWatts = nil }
+        }
+    }
+
+    /// Wi-Fi joins and drops arrive as path changes, so the 3-in-1 item's signal is re-read at
+    /// once instead of polled fast (it is otherwise read every 10 s).
+    private func watchWiFi(_ on: Bool) {
+        if !on {
+            wifiPath?.cancel()
+            wifiPath = nil
+            wifi = nil
+            return
+        }
+        guard wifiPath == nil else { return }
+        let m = NWPathMonitor(requiredInterfaceType: .wifi)
+        m.pathUpdateHandler = { [weak self] _ in self?.wifiStale = true }
+        m.start(queue: queue)
+        wifiPath = m
     }
 
     /// A dropdown opened/closed: sample its details (and faster) only while it is visible.
@@ -142,6 +190,7 @@ final class StatsEngine {
         queue.async {
             if on { self.detail.insert(module) } else { self.detail.remove(module) }
             if !self.detail.contains(.cpu) && !self.detail.contains(.memory) && !self.detail.contains(.disk) { self.processes.reset() }
+            if !self.detail.contains(.battery) { self.energy.reset() }
             self.reschedule(primeNow: on)
         }
     }
@@ -285,13 +334,33 @@ final class StatsEngine {
                 s.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
             }
         }
-        if active.contains(.battery) {
+        if active.contains(.battery) || active.contains(.trio) {
             var b = BatteryReader.quick()
             if detail.contains(.battery) {
                 if b != nil { BatteryReader.details(into: &b!) }
                 s.devices = PeripheralBatteryReader.sample()
             }
             s.battery = b
+            // Four SMC reads (~0.4 ms): only for a dropdown that shows the flow, or the rate element.
+            if b != nil, detail.contains(.battery) || detail.contains(.trio) || (powerInBar && needed.contains(.battery)) {
+                if smc == nil { smc = SMC() }
+                s.power = PowerFlowReader.sample(smc: smc, battery: b, full: detail.contains(.battery))
+                if let w = s.power?.battery { barWatts = PowerFlowMath.smoothed(previous: barWatts, current: w) }
+                s.barWatts = barWatts
+            }
+            if detail.contains(.battery) {
+                s.energy = energy.sample()
+                s.energyMeasuring = energy.measuring
+            }
+        }
+        if active.contains(.trio) {
+            let full = detail.contains(.trio)
+            if full || wifiStale || wifi == nil || now - wifiReadAt >= max(interval, 10) {
+                wifi = WiFiLinkReader.sample(detail: full)
+                wifiReadAt = now
+                wifiStale = false
+            }
+            s.wifi = wifi
         }
         if detail.contains(.cpu) || detail.contains(.memory) || detail.contains(.disk) {
             let all = processes.sample()

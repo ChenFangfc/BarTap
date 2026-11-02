@@ -83,6 +83,9 @@ enum StatsRenderer {
         case .battery: return L("BAT")
         case .time: return ""
         case .ai: return "AI"
+        case .volume: return L("VOL")
+        case .bluetooth: return "BT"
+        case .trio: return ""
         }
     }
 
@@ -114,8 +117,18 @@ enum StatsRenderer {
         case .aiPlanPercent: return percentBox
         case .aiPlanTwo: return planLabelWidth + 2 + textWidth("100%", lineFont)
         case .aiCredits: return pieSize + 3 + creditsBox
+        case .batteryPower: return max(textWidth("−188 W", valueFont), textWidth("+188 W", valueFont))
+        case .speaker: return TrioGlyphs.speakerWidth
+        case .levelMeter: return TrioGlyphs.meterWidth
+        case .bluetoothIcon: return TrioGlyphs.bluetoothWidth + 1 + countBox
+        case .lowestBattery: return TrioGlyphs.miniBatteryWidth + 2 + percentBox
+        case .airPods: return earLabelWidth + 2 + textWidth("100%", lineFont)
+        case .trio: return TrioGlyphs.trioWidth
         }
     }
+
+    private static var countBox: CGFloat { textWidth("9+", lineFont) }
+    private static var earLabelWidth: CGFloat { max(textWidth("L", lineFont), textWidth("R", lineFont)) }
 
     private static var planLabelWidth: CGFloat { max(textWidth("5h", lineFont), textWidth("7d", lineFont)) }
     private static var creditsBox: CGFloat { max(textWidth("$88.88", valueFont), textWidth("$88.8K", valueFont)) }
@@ -292,6 +305,34 @@ enum StatsRenderer {
             single(clockText(o.clockFormat, now), box: r, align: .center)
         case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits:
             break
+        case .batteryPower:
+            single(PowerFlowMath.barText(s?.barWatts), box: r)
+        case .speaker:
+            let a = s?.audio
+            TrioGlyphs.speaker(waves: a.map { VolumeMath.waves($0.level, muted: $0.muted) } ?? -1, muted: a?.muted ?? false, x: r.minX, midY: r.midY)
+        case .levelMeter:
+            TrioGlyphs.levelMeter(filled: s?.audio.map { VolumeMath.filledBars($0.level, muted: $0.muted) } ?? 0, x: r.minX, bottom: r.midY - 7.5)
+        case .bluetoothIcon:
+            // The count sits low beside the rune, like a subscript; none while nothing is connected.
+            let n = s?.bluetooth?.connected.count ?? 0
+            TrioGlyphs.bluetooth(x: r.minX, midY: r.midY, active: s?.bluetooth?.powered == true && n > 0)
+            if n > 0 {
+                text(n > 9 ? "9+" : "\(n)", lineFont, NSRect(x: r.minX + TrioGlyphs.bluetoothWidth + 1, y: 0.5, width: countBox, height: 11), align: .left)
+            }
+        case .lowestBattery:
+            let level = s?.bluetooth?.lowest?.lowestBattery
+            TrioGlyphs.miniBattery(level.map { Double($0) / 100 }, x: r.minX, midY: r.midY)
+            single(level.map { "\($0)%" } ?? "–", box: NSRect(x: r.minX + TrioGlyphs.miniBatteryWidth + 2, y: r.minY, width: percentBox, height: r.height))
+        case .airPods:
+            let e = s?.bluetooth?.earbuds
+            label("L", x: r.minX, top: true)
+            label("R", x: r.minX, top: false)
+            twoLines(e?.left.map { "\($0)%" } ?? "–", e?.right.map { "\($0)%" } ?? "–",
+                     box: NSRect(x: r.minX + earLabelWidth + 2, y: 0, width: r.width - earLabelWidth - 2, height: r.height))
+        case .trio:
+            let b = s?.battery, a = s?.audio
+            TrioGlyphs.trio(battery: b.map { Double($0.percent) / 100 }, charging: b?.charging ?? false, wifiBars: s?.wifi?.bars ?? 0,
+                            waves: a.map { VolumeMath.waves($0.level, muted: $0.muted) } ?? -1, muted: a?.muted ?? false, x: r.minX, y: r.minY)
         }
     }
 
@@ -324,7 +365,9 @@ enum StatsRenderer {
         case .gpu: return s.gpu ?? 0
         case .memory: return s.memory?.usedFraction ?? 0
         case .disk: return bootVolume(s)?.usedFraction ?? 0
-        case .battery: return Double(s.battery?.percent ?? 0) / 100
+        case .battery, .trio: return Double(s.battery?.percent ?? 0) / 100
+        case .volume: return s.audio.map { VolumeMath.effective($0.level, muted: $0.muted) } ?? 0
+        case .bluetooth: return Double(s.bluetooth?.lowest?.lowestBattery ?? 0) / 100
         case .network, .sensors, .time, .ai: return 0
         }
     }
@@ -336,7 +379,9 @@ enum StatsRenderer {
         case .gpu: return s.gpu.map { StatFormat.percent($0) } ?? "–"
         case .memory: return s.memory.map { StatFormat.percent($0.usedFraction) } ?? "–"
         case .disk: return bootVolume(s).map { StatFormat.percent($0.usedFraction) } ?? "–"
-        case .battery: return s.battery.map { "\($0.percent)%" } ?? "–"
+        case .battery, .trio: return s.battery.map { "\($0.percent)%" } ?? "–"
+        case .volume: return s.audio.map { $0.volume == nil ? "–" : VolumeMath.percentText($0.level, muted: $0.muted) } ?? "–"
+        case .bluetooth: return s.bluetooth?.lowest?.lowestBattery.map { "\($0)%" } ?? "–"
         case .network, .sensors, .time, .ai: return "–"
         }
     }
@@ -590,6 +635,17 @@ enum StatsRenderer {
             case .timeLeft: return timeLeftText(s)
             case .clock: return clockText(o.clockFormat, now)
             case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits: return ""
+            case .batteryPower: return PowerFlowMath.barText(s.barWatts)
+            case .speaker: return s.audio.map { "\(VolumeMath.waves($0.level, muted: $0.muted))|\($0.muted)" } ?? "-"
+            case .levelMeter: return s.audio.map { "\(VolumeMath.filledBars($0.level, muted: $0.muted))" } ?? "-"
+            case .bluetoothIcon: return "\(s.bluetooth?.powered ?? false)|\(s.bluetooth?.connected.count ?? -1)"
+            case .lowestBattery: return "\(s.bluetooth?.lowest?.lowestBattery ?? -1)"
+            case .airPods: return "\(s.bluetooth?.earbuds?.left ?? -1)|\(s.bluetooth?.earbuds?.right ?? -1)"
+            case .trio:
+                // The battery fill is ~31 px wide at 2x: one step per pixel.
+                let fill = s.battery.map { String(Int((Double($0.percent) / 100 * 31).rounded())) } ?? "-"
+                return fill + "|\(s.battery?.charging ?? false)|\(s.wifi?.bars ?? -1)|"
+                    + (s.audio.map { "\(VolumeMath.waves($0.level, muted: $0.muted))|\($0.muted)" } ?? "-")
             }
         }
         return head + "|" + parts.joined(separator: "#")
@@ -608,8 +664,23 @@ enum StatsRenderer {
             return "Disk \(bootVolume(s).map { StatFormat.percent($0.usedFraction) } ?? ""), read \(rateText(s.diskRead, o)), write \(rateText(s.diskWrite, o))"
         case .network: return "Network up \(StatFormat.rate(s.netUp, bits: o.bits)), down \(StatFormat.rate(s.netDown, bits: o.bits))"
         case .sensors: return "CPU temperature \(temperatureText(s, o))"
-        case .battery: return "Battery \(s.battery.map { "\($0.percent)%" } ?? "")"
+        case .battery:
+            let rate = s.barWatts.map { ", " + PowerFlowMath.barText($0) } ?? ""
+            return "Battery \(s.battery.map { "\($0.percent)%" } ?? "")" + rate
         case .time: return ""
+        case .volume:
+            guard let a = s.audio else { return "Volume" }
+            return a.muted ? "Volume muted" : "Volume \(percentText(.volume, s))"
+        case .bluetooth:
+            guard let bt = s.bluetooth else { return "Bluetooth" }
+            guard bt.powered else { return "Bluetooth off" }
+            let low = bt.lowest.flatMap { d in d.lowestBattery.map { ", lowest battery \($0)% (\(d.name))" } } ?? ""
+            return "Bluetooth, \(bt.connected.count) connected" + low
+        case .trio:
+            let battery = s.battery.map { "Battery \($0.percent)%" + ($0.charging ? ", charging" : "") } ?? "No battery"
+            let wifi = (s.wifi?.bars ?? 0) > 0 ? "Wi-Fi signal \(s.wifi?.bars ?? 0) of 3" : "Wi-Fi not connected"
+            let volume = s.audio.map { $0.muted ? "volume muted" : "volume \(percentText(.volume, s))" } ?? ""
+            return [battery, wifi, volume].filter { !$0.isEmpty }.joined(separator: "; ")
         case .ai:
             guard let a = s.ai else { return "AI usage" }
             let credits = a.total.spend.map { s in ", usage credits " + AIFormat.money(s.used, currency: s.currency) + (s.limit.map { " of " + AIFormat.money($0, currency: s.currency) } ?? "") } ?? ""
