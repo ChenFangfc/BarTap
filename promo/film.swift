@@ -5,6 +5,7 @@
 //   swiftc -O promo/film.swift -o .build/film && .build/film <repo> | ffmpeg -f rawvideo ...
 //   (see promo/build.sh)
 import AppKit
+import CoreImage
 
 let W: CGFloat = 1920, H: CGFloat = 1080, FPS = 30.0
 let duration = 37.0
@@ -49,7 +50,7 @@ let S: [String: String] = zh ? [
     "peek": "Hover for details", "lid": "Awake, lid closed",
     "lidT": "Close the lid. Your AI keeps going.", "lidT2": "Stay awake with the lid closed: long runs and overnight jobs keep running",
     "lidOn": "Awake with lid closed · On",
-    "term0": "› AI agent: refactoring 12 files…", "term1": "✓ all 128 tests passed", "term2": "› next: update the docs, then commit…",
+    "term0": "› agent: refactoring 12 files…", "term1": "✓ all 128 tests passed", "term2": "› next: docs, then commit…",
     "dl": "Save a video. Let AI sum it up.", "dl2": "Paste a link, pick a quality, or audio only",
     "ask": "Sum up this video", "reply": "A 10-minute short: one big rabbit, three bullies and one sweet comeback.",
     "idle": "CPU when idle", "mem": "memory", "fakes": "clicks blocked",
@@ -306,47 +307,137 @@ func softShadow(_ alpha: Double, blur: CGFloat = 30, dy: CGFloat = -10, strength
     shadow.set()
 }
 
-/// A laptop seen from the front, its lid open by `open` (1 open, 0 shut) and folding toward the
-/// hinge; the screen shows an AI agent at work.
-func drawLaptop(center c: CGPoint, open: Double, t: Double, alpha: Double) {
-    guard alpha > 0.001 else { return }
-    let sw: CGFloat = 620, sh: CGFloat = 330
-    let hinge = c.y + sh / 2
-    let base = NSRect(x: c.x - sw / 2 - 60, y: hinge, width: sw + 120, height: 24)
+// A laptop as a simple 3D model (lid scene), seen from a little above and to the right: the lid
+// turns on its hinge, the screen shows an AI agent at work (mapped in perspective), and once the lid
+// passes the line of sight its aluminium back shows, as a real one does.
+
+struct V3 { var x: CGFloat, y: CGFloat, z: CGFloat }
+func + (a: V3, b: V3) -> V3 { V3(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z) }
+func - (a: V3, b: V3) -> V3 { V3(x: a.x - b.x, y: a.y - b.y, z: a.z - b.z) }
+func * (a: V3, k: CGFloat) -> V3 { V3(x: a.x * k, y: a.y * k, z: a.z * k) }
+func dot(_ a: V3, _ b: V3) -> CGFloat { a.x * b.x + a.y * b.y + a.z * b.z }
+func cross(_ a: V3, _ b: V3) -> V3 { V3(x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x) }
+func unit(_ a: V3) -> V3 { a * (1 / sqrt(dot(a, a))) }
+
+struct Camera {
+    let eye: V3, fwd: V3, right: V3, up: V3
+    let f: CGFloat, center: CGPoint
+    init(eye: V3, target: V3, f: CGFloat, center: CGPoint) {
+        self.eye = eye
+        self.f = f
+        self.center = center
+        fwd = unit(target - eye)
+        right = unit(cross(fwd, V3(x: 0, y: 1, z: 0)))
+        up = cross(right, fwd)
+    }
+    /// Film coordinates (y down).
+    func p(_ q: V3) -> CGPoint {
+        let d = q - eye, z = dot(d, fwd)
+        return CGPoint(x: center.x + f * dot(d, right) / z, y: center.y - f * dot(d, up) / z)
+    }
+    /// Whether a face through `q` with outward normal `n` faces the camera.
+    func sees(_ q: V3, _ n: V3) -> Bool { dot(n, eye - q) > 0 }
+}
+
+let laptopCam = Camera(eye: V3(x: 560, y: 600, z: 1550), target: V3(x: 0, y: 120, z: 0), f: 1050, center: CGPoint(x: 960, y: 540))
+let ciContext = CIContext(options: [.cacheIntermediates: false])
+
+func fillQuad(_ q: [CGPoint], _ color: NSColor) {
+    let path = NSBezierPath()
+    path.move(to: q[0])
+    for pt in q.dropFirst() { path.line(to: pt) }
+    path.close()
+    color.setFill()
+    path.fill()
+}
+
+/// What the screen shows: the agent's lines, then a blinking caret.
+func screenImage(t: Double, width: Int, height: Int) -> CGImage? {
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+          let g = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
     NSGraphicsContext.saveGraphicsState()
-    softShadow(alpha, blur: 34, dy: -12, strength: 0.14)
-    NSColor(srgbRed: 0.80, green: 0.80, blue: 0.82, alpha: CGFloat(alpha)).setFill()
-    NSBezierPath(roundedRect: base, xRadius: 12, yRadius: 12).fill()
-    NSGraphicsContext.restoreGraphicsState()
-    NSColor(srgbRed: 0.66, green: 0.66, blue: 0.69, alpha: CGFloat(alpha)).setFill()
-    NSBezierPath(roundedRect: NSRect(x: c.x - 70, y: hinge, width: 140, height: 9), xRadius: 4, yRadius: 4).fill()
-    // The lid, squashed toward the hinge as it shuts.
-    let k = CGFloat(max(open, 0.025))
-    NSGraphicsContext.saveGraphicsState()
-    let tr = NSAffineTransform()
-    tr.translateX(by: 0, yBy: hinge)
-    tr.scaleX(by: 1, yBy: k)
-    tr.translateX(by: 0, yBy: -hinge)
-    tr.concat()
-    let lid = NSRect(x: c.x - sw / 2, y: hinge - sh, width: sw, height: sh)
-    NSColor(srgbRed: 0.17, green: 0.17, blue: 0.19, alpha: CGFloat(alpha)).setFill()
-    NSBezierPath(roundedRect: lid, xRadius: 22, yRadius: 22).fill()
-    let screen = lid.insetBy(dx: 16, dy: 16)
-    NSColor(srgbRed: 0.07, green: 0.08, blue: 0.10, alpha: CGFloat(alpha)).setFill()
-    NSBezierPath(roundedRect: screen, xRadius: 8, yRadius: 8).fill()
-    let font = NSFont.monospacedSystemFont(ofSize: 25, weight: .medium)
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: g.cgContext, flipped: true)
+    g.cgContext.translateBy(x: 0, y: CGFloat(height))
+    g.cgContext.scaleBy(x: 1, y: -1)
+    NSColor(srgbRed: 0.06, green: 0.07, blue: 0.09, alpha: 1).setFill()
+    NSRect(x: 0, y: 0, width: width, height: height).fill()
+    // As large as the widest line allows (some languages run longer).
+    let lines = (0..<termTimes.count).map { S["term\($0)"] ?? "" }
+    let base = NSFont.monospacedSystemFont(ofSize: CGFloat(height) * 0.085, weight: .medium)
+    let widest = lines.map { NSAttributedString(string: $0, attributes: [.font: base]).size().width }.max() ?? 1
+    let font = NSFont.monospacedSystemFont(ofSize: base.pointSize * min(1, CGFloat(width) * 0.86 / widest), weight: .medium)
+    let lineH = CGFloat(height) * 0.16, x0 = CGFloat(width) * 0.06, y0 = CGFloat(height) * 0.12
     for (i, at) in termTimes.enumerated() {
-        let la = alpha * easeOut(prog(t, at, at + 0.2))
+        let la = easeOut(prog(t, at, at + 0.2))
         guard la > 0.001 else { continue }
         let color = i == 1 ? NSColor(srgbRed: 0.45, green: 0.86, blue: 0.55, alpha: CGFloat(la)) : NSColor(white: 0.93, alpha: CGFloat(la))
-        NSAttributedString(string: S["term\(i)"] ?? "", attributes: [.font: font, .foregroundColor: color])
-            .draw(at: CGPoint(x: screen.minX + 30, y: screen.minY + 36 + CGFloat(i) * 54))
+        NSAttributedString(string: lines[i], attributes: [.font: font, .foregroundColor: color])
+            .draw(at: CGPoint(x: x0, y: y0 + CGFloat(i) * lineH))
     }
-    if t >= termTimes[2] + 0.2, Int(t / 0.25) % 2 == 0 {   // a blinking caret: still working
-        NSColor(white: 0.93, alpha: CGFloat(alpha)).setFill()
-        NSRect(x: screen.minX + 30, y: screen.minY + 36 + 3 * 54 + 2, width: 14, height: 28).fill()
+    if t >= termTimes[2] + 0.2, Int(t / 0.25) % 2 == 0 {
+        NSColor(white: 0.93, alpha: 1).setFill()
+        NSRect(x: x0, y: y0 + 3 * lineH + lineH * 0.05, width: font.pointSize * 0.55, height: font.pointSize * 1.1).fill()
     }
+    // A faint sheen across the glass.
+    NSGradient(colors: [NSColor(white: 1, alpha: 0.07), NSColor(white: 1, alpha: 0)])?
+        .draw(in: NSRect(x: 0, y: 0, width: width, height: height), angle: -35)
     NSGraphicsContext.restoreGraphicsState()
+    return rep.cgImage
+}
+
+/// Draws `image` onto the quad (top-left, top-right, bottom-right, bottom-left; film coordinates).
+func drawMapped(_ image: CGImage, _ q: [CGPoint], alpha: Double) {
+    guard let filter = CIFilter(name: "CIPerspectiveTransform") else { return }
+    func v(_ p: CGPoint) -> CIVector { CIVector(x: p.x, y: H - p.y) }   // Core Image's y grows upward
+    filter.setValue(CIImage(cgImage: image), forKey: kCIInputImageKey)
+    filter.setValue(v(q[0]), forKey: "inputTopLeft")
+    filter.setValue(v(q[1]), forKey: "inputTopRight")
+    filter.setValue(v(q[2]), forKey: "inputBottomRight")
+    filter.setValue(v(q[3]), forKey: "inputBottomLeft")
+    guard let out = filter.outputImage else { return }
+    let ext = out.extent.integral
+    guard ext.width > 1, ext.height > 1, let cg = ciContext.createCGImage(out, from: ext) else { return }
+    NSImage(cgImage: cg, size: ext.size).draw(in: NSRect(x: ext.minX, y: H - ext.maxY, width: ext.width, height: ext.height),
+                                              from: .zero, operation: .sourceOver, fraction: CGFloat(alpha), respectFlipped: true, hints: nil)
+}
+
+/// The laptop, its lid open by `open` (1 open at 108°, 0 shut).
+func drawLaptop(open: Double, t: Double, alpha: Double) {
+    guard alpha > 0.001 else { return }
+    let cam = laptopCam
+    let a: CGFloat = 330, b: CGFloat = 225, tb: CGFloat = 14, L: CGFloat = 446, tl: CGFloat = 8
+    let A = CGFloat(alpha)
+    func c(_ w: CGFloat) -> NSColor { NSColor(srgbRed: w, green: w, blue: w + 0.02, alpha: A) }
+    // Base: the deck (keyboard, trackpad), its front and right side; the shadow grounds it.
+    let deck = [V3(x: -a, y: 0, z: -b), V3(x: a, y: 0, z: -b), V3(x: a, y: 0, z: b), V3(x: -a, y: 0, z: b)].map(cam.p)
+    NSGraphicsContext.saveGraphicsState()
+    softShadow(alpha, blur: 46, dy: -26, strength: 0.22)
+    fillQuad([V3(x: -a, y: -tb, z: -b), V3(x: a, y: -tb, z: -b), V3(x: a, y: -tb, z: b), V3(x: -a, y: -tb, z: b)].map(cam.p), c(0.70))
+    NSGraphicsContext.restoreGraphicsState()
+    fillQuad([V3(x: a, y: 0, z: -b), V3(x: a, y: 0, z: b), V3(x: a, y: -tb, z: b), V3(x: a, y: -tb, z: -b)].map(cam.p), c(0.66))
+    fillQuad([V3(x: -a, y: 0, z: b), V3(x: a, y: 0, z: b), V3(x: a, y: -tb, z: b), V3(x: -a, y: -tb, z: b)].map(cam.p), c(0.74))
+    fillQuad(deck, c(0.87))
+    fillQuad([V3(x: -295, y: 0, z: -205), V3(x: 295, y: 0, z: -205), V3(x: 295, y: 0, z: -20), V3(x: -295, y: 0, z: -20)].map(cam.p), c(0.24))
+    fillQuad([V3(x: -110, y: 0, z: 25), V3(x: 110, y: 0, z: 25), V3(x: 110, y: 0, z: 200), V3(x: -110, y: 0, z: 200)].map(cam.p), c(0.80))
+    // Lid: turns on the hinge (the deck's back edge). `u` runs from the hinge to the far edge.
+    let th = CGFloat(108 * clamp(open) * .pi / 180)
+    let u = V3(x: 0, y: sin(th), z: cos(th))
+    let nIn = V3(x: 0, y: -cos(th), z: sin(th))   // the screen side
+    let nOut = nIn * -1
+    func lid(_ x: CGFloat, _ s: CGFloat, _ outer: Bool = false) -> V3 {
+        V3(x: x, y: 0, z: -b) + u * s + (outer ? nOut * tl : V3(x: 0, y: 0, z: 0))
+    }
+    // Its edges first: the far edge and the right side.
+    if cam.sees(lid(0, L), u) { fillQuad([lid(-a, L), lid(a, L), lid(a, L, true), lid(-a, L, true)].map(cam.p), c(0.72)) }
+    fillQuad([lid(a, 0), lid(a, L), lid(a, L, true), lid(a, 0, true)].map(cam.p), c(0.68))
+    if cam.sees(lid(0, L / 2), nIn) {
+        fillQuad([lid(-a, L), lid(a, L), lid(a, 0), lid(-a, 0)].map(cam.p), c(0.12))   // bezel
+        let quad = [lid(-a + 18, L - 18), lid(a - 18, L - 18), lid(a - 18, 16), lid(-a + 18, 16)].map(cam.p)
+        if let img = screenImage(t: t, width: 1248, height: 824) { drawMapped(img, quad, alpha: alpha) }
+    } else {
+        fillQuad([lid(-a, L, true), lid(a, L, true), lid(a, 0, true), lid(-a, 0, true)].map(cam.p), c(0.84))   // its back
+    }
 }
 
 /// A capsule with a green dot: BarTap's switch, on.
@@ -696,8 +787,8 @@ func frame(_ t: Double) {
     // ---- Lid scene: close the lid, the AI keeps going. ------------------------------------------
     if t >= sLid - 0.1, t < sVideo + 0.1 {
         let a = window(t, sLid, sVideo, 0.3)
-        drawLaptop(center: CGPoint(x: W / 2, y: 500), open: 1 - ease(prog(t, lidCloseAt, lidCloseAt + 0.5)), t: t, alpha: a)
-        pill(S["lidOn"] ?? "", center: CGPoint(x: W / 2, y: 712), alpha: a * easeOut(prog(t, lidPill, lidPill + 0.3)))
+        drawLaptop(open: 1 - ease(prog(t, lidCloseAt, lidCloseAt + 0.6)), t: t, alpha: a)
+        pill(S["lidOn"] ?? "", center: CGPoint(x: W / 2, y: 748), alpha: a * easeOut(prog(t, lidPill, lidPill + 0.3)))
         caption("lidT", "lidT2", t: t, a: sLid + 0.3, b: sVideo)
     }
 
