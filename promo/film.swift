@@ -27,6 +27,7 @@ let S: [String: String] = zh ? [
     "all": "菜单栏管理该有的，都有。", "all2": "就是不会抽动。",
     "search": "搜索任意图标", "shelf": "刘海下方的图标架", "rules": "自动规则与快捷键", "clean": "一键干净菜单栏",
     "arrange": "拖动排列图标", "sound": "音量与蓝牙", "power": "电池功率流向", "video": "视频下载",
+    "peek": "悬停看详情", "lid": "合盖不睡眠",
     "idle": "空闲时 CPU", "mem": "内存", "fakes": "被拦截的点击",
     "end2": "免费 · macOS 13+ · github.com/ChenFangfc/BarTap",
 ] : [
@@ -40,6 +41,7 @@ let S: [String: String] = zh ? [
     "all": "Everything a menu bar manager should do.", "all2": "Without the twitching.",
     "search": "Search any icon", "shelf": "Shelf below the notch", "rules": "Rules & hotkeys", "clean": "Clean menu bar",
     "arrange": "Drag to arrange", "sound": "Volume & Bluetooth", "power": "Battery power flow", "video": "Video downloads",
+    "peek": "Hover for details", "lid": "Awake, lid closed",
     "idle": "CPU when idle", "mem": "memory", "fakes": "clicks blocked",
     "end2": "Free · macOS 13+ · github.com/ChenFangfc/BarTap",
 ]
@@ -255,6 +257,23 @@ func cursor(at p: CGPoint, alpha: Double, pressed: Bool = false) {
     path.stroke()
 }
 
+/// Resting the pointer: a ring fills around it; when it closes, the details open.
+func dwell(at p: CGPoint, progress x: Double, alpha: Double) {
+    guard alpha > 0.001, x > 0 else { return }
+    let c = CGPoint(x: p.x + 13, y: p.y + 22), r: CGFloat = 36
+    let track = NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+    track.lineWidth = 5
+    NSColor.black.withAlphaComponent(0.10 * CGFloat(alpha)).setStroke()
+    track.stroke()
+    // y grows downward here, so increasing angles run clockwise on screen, from 12 o'clock.
+    let arc = NSBezierPath()
+    arc.appendArc(withCenter: c, radius: r, startAngle: -90, endAngle: -90 + 360 * CGFloat(min(x, 1)), clockwise: false)
+    arc.lineWidth = 5
+    arc.lineCapStyle = .round
+    NSColor(srgbRed: 0.1, green: 0.45, blue: 1, alpha: CGFloat(alpha)).setStroke()
+    arc.stroke()
+}
+
 func ripple(at c: CGPoint, t: Double, start: Double) {
     let x = prog(t, start, start + 0.55)
     guard x > 0, x < 1 else { return }
@@ -306,6 +325,8 @@ let s1 = 0.0, s2 = 4.2, s3 = 8.4, s4 = 12.6, s5 = 18.0, s6 = 23.4, s7 = 28.2, s8
 let land = s4                          // the mark settles into the bar
 let collapseAt = s4 + 1.2, tap1 = s4 + 3.0, tap2 = s4 + 4.2
 let cpuClick = s5 + 1.8
+/// The pointer rests on CPU, a ring fills, and its details open: no click (S6 clicks).
+let cpuRest = cpuClick - 0.1, cpuPeek = cpuClick + 0.3
 let aiItemTime = s6 + 0.3, aiClick = s6 + 1.8
 let endAt = s8 + 2.4
 /// S1: when each third-party icon appears: accelerating, on a 16th-note grid.
@@ -318,7 +339,7 @@ let popTimes: [Double] = {
     return out
 }()
 let itemTimes = (0..<3).map { s5 + 0.15 + 0.15 * Double($0) }
-let cardTimes = (0..<8).map { s7 + 0.3 + 0.17 * Double($0) }
+let cardTimes = (0..<10).map { s7 + 0.3 + 0.15 * Double($0) }
 let numberTimes = (0..<3).map { s8 + 0.3 * Double($0) }
 let hopTimes = Array(stride(from: s2 + 0.3, to: s3, by: 0.3))   // S2's teleporting cursor
 
@@ -440,14 +461,14 @@ func frame(_ t: Double) {
             right = left - gap
         }
         drawItem(toggleCollapsed, right: lerp(s4ToggleRight, right, ease(prog(t, s5, s5 + 0.7))), alpha: barA)
-        // Click on CPU → dropdown (its top half, large enough to read).
-        let open = ease(prog(t, cpuClick, cpuClick + 0.4)) * (1 - ease(prog(t, s6 - 0.5, s6 - 0.1)))
+        // Rest the pointer on CPU → its details open (its top half, large enough to read).
+        let open = ease(prog(t, cpuPeek, cpuPeek + 0.4)) * (1 - ease(prog(t, s6 - 0.5, s6 - 0.1)))
         if open > 0.001 { dropdown(cpuPanel, under: cpuRect, crop: 0.5, scale: 1.6, reveal: CGFloat(open)) }
-        ripple(at: CGPoint(x: cpuRect.midX, y: cpuRect.midY), t: t, start: cpuClick - 0.05)
-        let cA = window(t, cpuClick - 0.8, cpuClick + 1.0, 0.3)
-        let arrive = ease(prog(t, cpuClick - 0.8, cpuClick - 0.1))
-        cursor(at: CGPoint(x: lerp(1500, cpuRect.midX + 4, arrive), y: lerp(560, cpuRect.midY + 2, arrive)),
-               alpha: cA, pressed: abs(t - cpuClick) < 0.12)
+        let cA = window(t, cpuClick - 0.8, cpuPeek + 1.0, 0.3)
+        let arrive = ease(prog(t, cpuClick - 0.8, cpuRest))
+        let cpuPointer = CGPoint(x: lerp(1500, cpuRect.midX + 4, arrive), y: lerp(560, cpuRect.midY + 2, arrive))
+        dwell(at: cpuPointer, progress: prog(t, cpuRest, cpuPeek), alpha: cA * (1 - prog(t, cpuPeek, cpuPeek + 0.25)))
+        cursor(at: cpuPointer, alpha: cA)
         caption("stats", "stats2", t: t, a: s5 + 0.4, b: s6)
         // Click AI usage → its dropdown (totals by range and by agent).
         let aiOpen = ease(prog(t, aiClick, aiClick + 0.4)) * (1 - ease(prog(t, s7 - 0.5, s7 - 0.1)))
@@ -464,10 +485,11 @@ func frame(_ t: Double) {
     if t >= s7, t < s8 + 0.4 {
         let cards: [(String, String)] = [("arrow.left.and.right", "arrange"), ("magnifyingglass", "search"),
                                          ("rectangle.bottomthird.inset.filled", "shelf"), ("wand.and.stars", "rules"),
+                                         ("cursorarrow.rays", "peek"),
                                          ("speaker.wave.2", "sound"), ("powerplug", "power"),
-                                         ("arrow.down.circle", "video"), ("eye.slash", "clean")]
-        let perRow = 4
-        let cw: CGFloat = 330, ch: CGFloat = 200, gap: CGFloat = 32
+                                         ("arrow.down.circle", "video"), ("laptopcomputer", "lid"), ("eye.slash", "clean")]
+        let perRow = 5
+        let cw: CGFloat = 300, ch: CGFloat = 190, gap: CGFloat = 26
         let total = CGFloat(perRow) * cw + CGFloat(perRow - 1) * gap
         for (i, (sym, key)) in cards.enumerated() {
             let a0 = cardTimes[i]
@@ -475,7 +497,7 @@ func frame(_ t: Double) {
             let a = prog(t, a0, a0 + 0.3) * (1 - prog(t, s8, s8 + 0.4))
             guard a > 0.001 else { continue }
             let x = (W - total) / 2 + CGFloat(i % perRow) * (cw + gap)
-            let y: CGFloat = 250 + CGFloat(i / perRow) * (ch + gap) + CGFloat(40 * (1 - p))
+            let y: CGFloat = 270 + CGFloat(i / perRow) * (ch + gap) + CGFloat(40 * (1 - p))
             let r = NSRect(x: x, y: y, width: cw, height: ch)
             NSGraphicsContext.saveGraphicsState()
             let shadow = NSShadow()
@@ -488,8 +510,8 @@ func frame(_ t: Double) {
             NSGraphicsContext.restoreGraphicsState()
             let img = symbol(sym, 54)
             let iw = img.size.width, ih = img.size.height
-            drawTinted(img, in: NSRect(x: r.midX - iw / 2, y: r.minY + 92 - ih / 2, width: iw, height: ih), color: ink, alpha: a)
-            text(S[key] ?? "", size: 27, weight: .semibold, center: CGPoint(x: r.midX, y: r.maxY - 46), alpha: a)
+            drawTinted(img, in: NSRect(x: r.midX - iw / 2, y: r.minY + 86 - ih / 2, width: iw, height: ih), color: ink, alpha: a)
+            text(S[key] ?? "", size: 26, weight: .semibold, center: CGPoint(x: r.midX, y: r.maxY - 44), alpha: a)
         }
         caption("all", "all2", t: t, a: s7 + 0.5, b: s8)
     }
@@ -538,7 +560,7 @@ if mode == "cues" {
     cue(s3 + 0.5, "draw"); cue(s3 + 2.1, "drawn"); cue(s4 - 0.7, "fly"); cue(land, "land")
     cue(collapseAt, "hide"); cue(tap1, "tap", 0); cue(tap2, "tap", 1)
     for (i, p) in itemTimes.enumerated() { cue(p, "item", i) }
-    cue(cpuClick, "click")
+    cue(cpuPeek, "click")
     cue(aiItemTime, "item", 3); cue(aiClick, "click")
     for (i, p) in cardTimes.enumerated() { cue(p, "card", i) }
     for (i, p) in numberTimes.enumerated() { cue(p, "number", i) }
