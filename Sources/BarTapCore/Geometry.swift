@@ -32,12 +32,15 @@ public struct ScreenInfo: Equatable {
     public var menuBarHeight: CGFloat
     /// Horizontal span hidden by the camera housing, if the display has one.
     public var notch: ClosedRange<CGFloat>?
+    /// Asleep (a closed lid with other displays attached): its window positions are stale.
+    public var asleep: Bool
 
-    public init(id: UInt32, frame: CGRect, menuBarHeight: CGFloat, notch: ClosedRange<CGFloat>? = nil) {
+    public init(id: UInt32, frame: CGRect, menuBarHeight: CGFloat, notch: ClosedRange<CGFloat>? = nil, asleep: Bool = false) {
         self.id = id
         self.frame = frame
         self.menuBarHeight = menuBarHeight
         self.notch = notch
+        self.asleep = asleep
     }
 
     public var menuBarRect: CGRect {
@@ -149,24 +152,29 @@ public enum MenuBarSections {
 public struct OwnRun: Equatable {
     public var hidden: CGFloat
     public var toggle: CGFloat
+    /// The stats items' window widths, in the order new ones are placed right of the toggle. They
+    /// can sit anywhere (Settings › Layout moves them); when several windows look like the toggle,
+    /// the one most of them follow wins.
     public var stats: [CGFloat]
     public var always: CGFloat?
+    /// The toggle's distance from its display's right edge as BarTap last saw it (can lag), to
+    /// pick between look-alikes.
+    public var toggleRD: CGFloat?
 
-    public init(hidden: CGFloat, toggle: CGFloat, stats: [CGFloat], always: CGFloat?) {
+    public init(hidden: CGFloat, toggle: CGFloat, stats: [CGFloat], always: CGFloat?, toggleRD: CGFloat? = nil) {
         self.hidden = hidden
         self.toggle = toggle
         self.stats = stats
         self.always = always
+        self.toggleRD = toggleRD
     }
 
-    /// Where the run is drawn on one display.
+    /// Where the dividers and the toggle are drawn on one display.
     public struct Located: Equatable {
         public var screen: ScreenInfo
         public var toggle: CGRect
         public var hidden: CGRect
         public var always: CGRect?
-        /// The toggle and the stats items, left to right.
-        public var run: [CGRect]
     }
 
     /// The run's windows as frames on the first display that draws it, or nil.
@@ -177,20 +185,27 @@ public struct OwnRun: Equatable {
         return nil
     }
 
-    /// The run's windows on one display, or nil if that bar doesn't draw it.
+    /// The dividers and the toggle on one display, or nil if that bar doesn't draw them.
     public func locate(on screen: ScreenInfo, windows: [WindowInfo]) -> Located? {
-        let pattern = [toggle] + stats
         func same(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.75 }
         let row = MenuBarGeometry.row(on: screen, windows: windows)
-        guard row.contains(where: \.isOnScreen), row.count >= pattern.count else { return nil }
-        for j in 0...(row.count - pattern.count) where zip(row[j...], pattern).allSatisfy({ same($0.bounds.width, $1) }) {
-            // │ right before the toggle: open (in the row), or collapsed (the wide window the row stopped at).
+        guard row.contains(where: \.isOnScreen) else { return nil }
+        let bar = windows.filter { $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1 }
+        // The window server names a status item's window after its autosave name, on the display
+        // that hosts it (window names need Screen Recording): exact, wherever the items sit, unless
+        // that display is asleep (its positions are then stale).
+        if !screen.asleep, let t = bar.first(where: { $0.name == "tb_toggle" }), let h = bar.first(where: { $0.name == "tb_hidden" }) {
+            return Located(screen: screen, toggle: t.bounds, hidden: h.bounds, always: bar.first(where: { $0.name == "tb_always" })?.bounds)
+        }
+        // Elsewhere by widths: │ (open, in the row; or collapsed, the long window the row stopped
+        // at) right before a toggle-wide window.
+        var best: (score: Int, distance: CGFloat, located: Located)?
+        for j in row.indices where same(row[j].bounds.width, toggle) {
             let divider: CGRect
             if j > 0, same(row[j - 1].bounds.width, hidden) {
                 divider = row[j - 1].bounds
-            } else if j == 0, let wide = windows.first(where: {
-                $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
-                    && $0.bounds.width >= separatorWidthThreshold && abs($0.bounds.maxX - row[0].bounds.minX) <= 2.5
+            } else if j == 0, let wide = bar.first(where: {
+                $0.bounds.width >= separatorWidthThreshold && abs($0.bounds.maxX - row[0].bounds.minX) <= 2.5
             }) {
                 divider = wide.bounds
             } else {
@@ -199,16 +214,20 @@ public struct OwnRun: Equatable {
             var alwaysFrame: CGRect?
             if let always {
                 alwaysFrame = row[..<max(0, j - 1)].last(where: { same($0.bounds.width, always) })?.bounds
-                    ?? windows.first(where: {   // collapsed: the wide window left of the hidden section
-                        $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
-                            && $0.bounds.width >= separatorWidthThreshold && $0.bounds.maxX <= divider.minX + 2.5
-                            && $0.bounds != divider
+                    ?? bar.first(where: {   // collapsed: the long window left of the hidden section
+                        $0.bounds.width >= separatorWidthThreshold && $0.bounds.maxX <= divider.minX + 2.5 && $0.bounds != divider
                     })?.bounds
             }
-            return Located(screen: screen, toggle: row[j].bounds, hidden: divider, always: alwaysFrame,
-                           run: row[j..<(j + pattern.count)].map(\.bounds))
+            // Look-alikes: prefer the one followed by the stats items, then the one nearest where
+            // BarTap last saw its toggle.
+            var score = 0
+            while score < stats.count, j + 1 + score < row.count, same(row[j + 1 + score].bounds.width, stats[score]) { score += 1 }
+            let distance = toggleRD.map { abs(MenuBarGeometry.rightDistance(of: row[j].bounds, on: screen) - $0) } ?? 0
+            let located = Located(screen: screen, toggle: row[j].bounds, hidden: divider, always: alwaysFrame)
+            if let b = best, score < b.score || (score == b.score && distance >= b.distance) { continue }
+            best = (score, distance, located)
         }
-        return nil
+        return best?.located
     }
 }
 
@@ -292,8 +311,10 @@ public enum LayoutPlan {
         }
     }
 
-    /// The next drag, or nil once `current` (left to right) has `wanted`'s order. Keys in `current`
-    /// that `wanted` doesn't mention stay where they are; keys missing from `current` are skipped.
+    /// The next drag, or nil once `current` (left to right) has `wanted`'s order. The icons already
+    /// in order (the longest such run; anchors always count among them) stay put, every other one
+    /// moves once, right to left, each next to the icon that follows it. Keys in `current` that
+    /// `wanted` doesn't mention stay where they are; keys missing from `current` are skipped.
     public static func nextStep(current: [String], wanted: [String], anchors: Set<String>) -> Step? {
         // Icons the plan doesn't know (one that appeared since) don't count as being in the way.
         let known = Set(wanted)
@@ -301,12 +322,35 @@ public enum LayoutPlan {
         for (i, key) in current.filter(known.contains).enumerated() where position[key] == nil { position[key] = i }
         let present = wanted.filter { position[$0] != nil }
         guard present.count >= 2 else { return nil }
+        let staying = inOrder(present.sorted { position[$0]! < position[$1]! }, rank: Dictionary(uniqueKeysWithValues: present.enumerated().map { ($1, $0) }),
+                              anchors: anchors)
         for i in stride(from: present.count - 2, through: 0, by: -1) {
             let item = present[i], right = present[i + 1]
-            guard !anchors.contains(item), let p = position[item], let r = position[right] else { continue }
-            if p + 1 != r { return Step(item: item, leftOf: right) }
+            guard !staying.contains(item), !anchors.contains(item) else { continue }
+            if position[item]! + 1 != position[right]! || !staying.contains(right) { return Step(item: item, leftOf: right) }
         }
         return nil
+    }
+
+    /// The longest run of `order` already in `rank` order, anchors weighing more than anything else
+    /// (they can't move).
+    static func inOrder(_ order: [String], rank: [String: Int], anchors: Set<String>) -> Set<String> {
+        let n = order.count
+        let weight = order.map { anchors.contains($0) ? 1000 : 1 }
+        var best = weight, previous = [Int](repeating: -1, count: n)
+        for i in 0..<n {
+            for j in 0..<i where rank[order[j]]! < rank[order[i]]! && best[j] + weight[i] > best[i] {
+                best[i] = best[j] + weight[i]
+                previous[i] = j
+            }
+        }
+        guard var i = best.indices.max(by: { best[$0] < best[$1] }) else { return [] }
+        var out: Set<String> = []
+        while i >= 0 {
+            out.insert(order[i])
+            i = previous[i]
+        }
+        return out
     }
 
     /// Every step, by applying each one to a copy of `current` (for progress and tests).
@@ -383,6 +427,25 @@ public struct LayoutArrangement: Equatable {
     /// items follow "│"). Without the always-hidden section its icons count as hidden.
     public func order(alwaysSection: Bool) -> [String] {
         (alwaysSection ? always + ["‖"] + hidden : always + hidden) + ["│"] + shown + pinned
+    }
+
+    /// What Apply aims for: icons the user moved (`touched`) go where these rows put them, each
+    /// before the icon that follows it here (or last in its row); every other icon keeps its row
+    /// and order from `fresh`, the bar as it is now. So Apply never moves an icon the user didn't.
+    public func rebased(onto fresh: LayoutArrangement, touched: Set<String>) -> LayoutArrangement {
+        var out = fresh
+        let present = Set(Row.allCases.flatMap { fresh[$0] })
+        let moving = touched.intersection(present).intersection(Row.allCases.flatMap { self[$0] })
+        for row in Row.allCases { out[row].removeAll { moving.contains($0) } }
+        for row in Row.allCases {
+            let mine = self[row]
+            // Right to left, so a moved icon can follow another moved one.
+            for i in mine.indices.reversed() where moving.contains(mine[i]) {
+                let next = mine[(i + 1)...].first { out[row].contains($0) }
+                out[row].insert(mine[i], at: next.flatMap { out[row].firstIndex(of: $0) } ?? out[row].count)
+            }
+        }
+        return out
     }
 
     /// These edits on top of the bar as it is now: icons that went away are dropped, new ones

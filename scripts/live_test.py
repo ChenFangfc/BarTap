@@ -674,6 +674,15 @@ def arrangement(rows):
     return a
 
 
+def settled_arrangement():
+    """The bar's order as Settings › Layout reads it: every icon out and BarTap's stats items
+    slim (so a crowded bar draws them all); an icon that isn't drawn reports a stale place."""
+    cmd("debug/slim-on"); cmd("debug/layout-open"); time.sleep(2.5)
+    a = arrangement(catalog())
+    cmd("debug/slim-off"); time.sleep(0.8)
+    return a
+
+
 def base_order(a):
     """Rows as apps' icons, left to right: an app's icons are numbered by position, so compare without the number."""
     return {k: [x.rsplit("#", 1)[0] for x in a[k]] for k in ("always", "hidden", "shown", "pinned")}
@@ -713,15 +722,19 @@ def scenario_layout_apply():
     launch(wait=1.0)
     time.sleep(2)
     # The page reveals every icon only while it captures them, then puts the bar back as it was.
+    # (Not when the toggle can't be drawn: BarTap then keeps everything shown on purpose.)
     cmd("hide"); time.sleep(0.8)
-    cmd("debug/layout-page-open"); time.sleep(1.5)
-    check(state()["effectiveLevel"] == "revealedAll", "icons revealed for capturing when the page opens")
-    check(wait_until(lambda: state()["effectiveLevel"] == "collapsed", 15), "bar hidden again while the page stays open")
-    check(state().get("imageCache", 0) > 0, "icons captured")
-    cmd("debug/layout-page-close"); time.sleep(0.5)
+    if state().get("toggleUndrawn"):
+        notes.append("layout: the toggle isn't drawn on any display (too little room beside the notch): BarTap stays open")
+    else:
+        cmd("debug/layout-page-open"); time.sleep(1.5)
+        check(state()["effectiveLevel"] == "revealedAll", "icons revealed for capturing when the page opens")
+        check(wait_until(lambda: state()["effectiveLevel"] == "collapsed", 15), "bar hidden again while the page stays open")
+        check(state().get("imageCache", 0) > 0, "icons captured")
+        cmd("debug/layout-page-close"); time.sleep(0.5)
     cmd("debug/layout-open"); time.sleep(3)
     check(state()["effectiveLevel"] == "revealedAll", "every icon shown for the moves")
-    original = arrangement(catalog())
+    original = settled_arrangement()
     if len(original["hidden"]) + len(original["shown"]) < 4:
         notes.append("layout scenario: too few icons")
         cmd("debug/layout-close")
@@ -735,12 +748,17 @@ def scenario_layout_apply():
     if h:
         across = dict(original, hidden=h[:-1], shown=[h[-1]] + original["shown"])
         tests.append(("rightmost hidden icon → shown", across))
+    # BarTap's own stats items move like any icon: the last one shown goes to the end of Hidden.
+    own = [k for k in original["shown"] if "|bartap.stats." in k]
+    if own:
+        stats_hidden = dict(original, hidden=h + [own[-1]], shown=[k for k in original["shown"] if k != own[-1]])
+        tests.append(("a BarTap stats item → hidden", stats_hidden))
     for name, wanted in tests:
         if not wait_idle():
             notes.append(f"layout: {name} skipped (the mouse or keyboard stayed in use)")
             continue
         out = apply_rows(wanted)
-        got = arrangement(catalog())
+        got = settled_arrangement()
         print(f"    {name}: {out.split('[')[0].strip()}")
         if "interrupted" in out:
             notes.append(f"layout: {name} interrupted by input")
@@ -752,7 +770,7 @@ def scenario_layout_apply():
             out = apply_rows(original)
             if "interrupted" not in out:
                 break
-        restored = arrangement(catalog())
+        restored = settled_arrangement()
         print(f"    restore: {out.split('[')[0].strip()}")
         check(same_order(restored, original), f"{name}: original order restored ({base_order(restored)})")
     check(state()["layoutProblem"] == "", "no layout problem afterwards")

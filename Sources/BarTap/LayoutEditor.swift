@@ -302,7 +302,7 @@ final class LayoutEditorView: NSView, NSViewToolTipOwner {
     }
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
-        if anchorFrame.contains(point) { return L("BarTap and its stats: shown icons sit to its right") }
+        if anchorFrame.contains(point) { return L("The BarTap button: icons right of it are shown") }
         guard let s = slot(at: point), let item = items[s.key] else { return "" }
         let name = item.title == item.appName ? item.appName : "\(item.title) — \(item.appName)"
         return s.pinned ? name + "\n" + L("macOS keeps this at the right end") : name
@@ -311,8 +311,10 @@ final class LayoutEditorView: NSView, NSViewToolTipOwner {
 
 /// Keeps the editor in step with the menu bar while Settings › Layout is open, holds the user's
 /// edits until Apply, and reports what Apply did. Every icon is revealed only for the few seconds
-/// it takes to capture them (when the page opens, after Apply, for a new icon): the rest of the time
-/// the menu bar stays as the user set it, the same on every display.
+/// it takes to read the bar and capture the icons (when the page opens, after Apply, for a new
+/// icon); on a bar too crowded to draw them all, BarTap's stats items shrink meanwhile. The rest of
+/// the time the menu bar stays as the user set it, the same on every display, and the rows keep
+/// that reading: an icon that is hidden or doesn't fit reports a stale place.
 final class LayoutPaneModel {
     private weak var host: SettingsHost?
     let editor = LayoutEditorView()
@@ -340,6 +342,11 @@ final class LayoutPaneModel {
     /// Every icon is revealed for capturing; and the icons tried that way (one that comes back
     /// blank must not reveal the bar again and again).
     private var revealing = false
+    private var slimmed = false
+    /// Readings are trusted once the bar has settled after revealing (or making room), and the bar
+    /// goes back only after one such reading.
+    private var settledAt = Date.distantFuture
+    private var readSettled = false
     private var tried: Set<String> = []
     /// Displays that can't fit every shown icon, as a note (checked while icons are hidden).
     private var crowding: String?
@@ -362,8 +369,8 @@ final class LayoutPaneModel {
     func start() {
         signature = ""
         tried = []
-        retryUntil = Date().addingTimeInterval(8)
-        reveal(ItemImages.permitted)
+        retryUntil = Date().addingTimeInterval(ItemImages.permitted ? 8 : 2)
+        reveal(true)
         // Give the bar a moment to show everything before the first look.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refresh() }
         timer?.invalidate()
@@ -382,6 +389,35 @@ final class LayoutPaneModel {
         guard on != revealing else { return }
         revealing = on
         host?.revealForLayout(on)
+        if on {
+            settledAt = Date().addingTimeInterval(0.5)
+            readSettled = false
+            // Once the bar is out: if it can't draw every icon (beside the notch), make room.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self, self.revealing, !self.slimmed, Self.crowded() else { return }
+                self.slimmed = true
+                self.host?.setStatsSlim(true)
+                self.settledAt = Date().addingTimeInterval(0.7)
+                self.readSettled = false
+                self.signature = ""
+                self.retryUntil = max(self.retryUntil, Date().addingTimeInterval(2))
+            }
+        } else if slimmed {
+            slimmed = false
+            host?.setStatsSlim(false)
+        }
+    }
+
+    /// A display whose bar is drawn leaves some icons out: their windows sit in its bar, not drawn.
+    static func crowded() -> Bool {
+        let windows = SystemQueries.windows(onScreenOnly: false)
+        return SystemQueries.screens(windows: windows).contains { s in
+            guard !s.asleep, MenuBarGeometry.row(on: s, windows: windows).contains(where: \.isOnScreen) else { return false }
+            return windows.contains {
+                $0.layer == WindowLevel.status && !$0.isOnScreen && abs($0.bounds.minY - s.frame.minY) <= 1
+                    && $0.bounds.width < separatorWidthThreshold && $0.bounds.midX > s.frame.minX && $0.bounds.midX < s.frame.maxX
+            }
+        }
     }
 
     // MARK: Editing
@@ -423,10 +459,10 @@ final class LayoutPaneModel {
                 self.pending = nil
                 self.touched = []
             }
-            // Capture the new order while every icon is still out (an app's icons are numbered by position).
+            // Read the new order while every icon is still out (an app's icons are numbered by position).
             self.tried = []
-            self.retryUntil = Date().addingTimeInterval(4)
-            self.reveal(ItemImages.permitted)
+            self.retryUntil = Date().addingTimeInterval(ItemImages.permitted ? 4 : 2)
+            self.reveal(true)
             self.signature = ""
             self.updateControls()
             self.status.stringValue = self.report ?? ""
@@ -457,7 +493,7 @@ final class LayoutPaneModel {
 
     // MARK: Showing
 
-    private func arrangement(of items: [BarItem]) -> LayoutArrangement {
+    static func arrangement(of items: [BarItem]) -> LayoutArrangement {
         var a = LayoutArrangement()
         for item in items {
             if item.section == .shown, let id = item.identifier, Self.pinnedIdentifiers.contains(id) {
@@ -491,6 +527,31 @@ final class LayoutPaneModel {
         status.stringValue = notes.joined(separator: "\n")
     }
 
+    /// BarTap's own stats items as BarTap draws them: always at hand, even when hidden or behind
+    /// the notch (a capture needs the icon on screen).
+    private func withOwnImages(_ images: [String: NSImage], items: [BarItem]) -> [String: NSImage] {
+        guard let host else { return images }
+        var out = images
+        let dark = host.menuBarIsDark
+        for item in items {
+            guard let id = item.identifier, id.hasPrefix("bartap.stats."), let img = host.statsItemImage(id) else { continue }
+            out[item.slotKey] = Self.barTinted(img, dark: dark)
+        }
+        return out
+    }
+
+    /// A template image in the menu bar's ink.
+    static func barTinted(_ image: NSImage, dark: Bool) -> NSImage {
+        guard image.isTemplate else { return image }
+        let ink = dark ? NSColor.white : NSColor.black
+        return NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            ink.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+
     /// Hidden icons are hidden on every display alike (one divider for all), but a display too
     /// narrow for every shown icon leaves some out: macOS drops what doesn't fit. Names those
     /// displays, so the user can hide icons until every display shows the same.
@@ -515,14 +576,15 @@ final class LayoutPaneModel {
 
     private func refresh() {
         guard let host, !applying else { return }
-        // Done capturing (or given up on the slow ones): the bar goes back as the user had it.
-        if revealing, Date() >= retryUntil { reveal(false) }
+        // Done reading and capturing (or given up on slow icons): the bar goes back as the user had it.
+        if revealing, Date() >= retryUntil, readSettled || Date() >= retryUntil.addingTimeInterval(5) { reveal(false) }
         guard AXCatalog.isTrusted else {
             editor.isHidden = true
             status.stringValue = L("Allow Accessibility (Settings › About) to see and arrange your menu bar here.")
             return
         }
         editor.isHidden = false
+        let settled = revealing && Date() >= settledAt
         host.catalogSnapshot { [weak self] items in
             guard let self, !self.applying else { return }
             let always = host.settings.alwaysHiddenEnabled
@@ -537,11 +599,16 @@ final class LayoutPaneModel {
             }
             if sig != self.signature, self.revealing { self.retryUntil = max(self.retryUntil, Date().addingTimeInterval(2)) }
             let crowding = host.barCollapsed && !self.revealing ? Self.crowdedDisplays() : nil
-            guard sig != self.signature || (missing && self.revealing && Date() < self.retryUntil) || crowding != self.crowding else { return }
+            guard sig != self.signature || (missing && self.revealing && Date() < self.retryUntil) || crowding != self.crowding
+                    || (settled && !self.readSettled) else { return }
             self.crowding = crowding
             self.signature = sig
             self.items = Dictionary(items.map { ($0.slotKey, $0) }, uniquingKeysWith: { first, _ in first })
-            let live = self.arrangement(of: items)
+            // Places are read while every icon is out; in between, only icons coming and going change
+            // the rows (a hidden icon, or one that doesn't fit, reports a stale place).
+            let fresh = Self.arrangement(of: items)
+            let live = settled || self.live == LayoutArrangement() ? fresh : self.live.merged(into: fresh)
+            if settled { self.readSettled = true }
             if always != self.alwaysSection {
                 // The rows themselves changed: start over from the bar.
                 self.pending = nil
@@ -554,7 +621,7 @@ final class LayoutPaneModel {
                 self.touched = self.touched.intersection(self.items.keys)
             }
             self.live = live
-            self.images = ItemImages.permitted ? ItemImages.cache : [:]
+            self.images = self.withOwnImages(ItemImages.permitted ? ItemImages.cache : [:], items: items)
             self.editor.darkBar = host.menuBarIsDark
             self.permissionButton?.isHidden = ItemImages.permitted
             self.show()
@@ -567,9 +634,9 @@ final class LayoutPaneModel {
                 ItemImages.capture(items) { [weak self] images in
                     guard let self, self.signature == sig, !self.applying else { return }
                     if revealed { self.tried.formUnion(items.map(\.slotKey)) }
-                    self.images = images
+                    self.images = self.withOwnImages(images, items: items)
                     self.show()
-                    if self.revealing, !items.contains(where: { images[$0.slotKey] == nil }) { self.reveal(false) }
+                    if self.revealing, self.readSettled, !items.contains(where: { images[$0.slotKey] == nil }) { self.reveal(false) }
                 }
             }
         }

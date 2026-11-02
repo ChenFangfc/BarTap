@@ -94,7 +94,8 @@ final class LayoutApplier {
     }
 
     /// Picks the display that draws the most icons (and BarTap's dividers), and names every icon by
-    /// its window there. "‖" and "│" stand for BarTap's dividers; the toggle and stats items follow "│".
+    /// its window there. "‖" and "│" stand for BarTap's dividers; the toggle always follows "│".
+    /// BarTap's stats items are icons like any other.
     private func plan(_ request: Request, items: [BarItem]) -> Plan? {
         guard let run = ownRun() else { return nil }
         let windows = SystemQueries.windows(onScreenOnly: false)
@@ -102,7 +103,7 @@ final class LayoutApplier {
         for screen in SystemQueries.screens(windows: windows) {
             guard let found = run.locate(on: screen, windows: windows), !request.alwaysSection || found.always != nil else { continue }
             let row = MenuBarGeometry.row(on: screen, windows: windows).filter {
-                $0.isOnScreen && !found.run.contains($0.bounds) && $0.bounds != found.hidden && $0.bounds != found.always
+                $0.isOnScreen && $0.bounds != found.toggle && $0.bounds != found.hidden && $0.bounds != found.always
             }
             var ids: [String: UInt32] = [:]
             var used = Set<UInt32>()
@@ -121,7 +122,8 @@ final class LayoutApplier {
             best = (screen, ids)
         }
         guard let best, !best.ids.isEmpty else { return nil }
-        let a = request.arrangement
+        // Only the icons the user moved move: the rest stay as the bar has them now.
+        let a = request.arrangement.rebased(onto: LayoutPaneModel.arrangement(of: items), touched: request.touched)
         func tokens(_ keys: [String]) -> [String] { keys.compactMap { best.ids[$0].map { "w\($0)" } } }
         let pinned = tokens(a.pinned)
         let wanted = (request.alwaysSection ? tokens(a.always) + ["‖"] + tokens(a.hidden) : tokens(a.always) + tokens(a.hidden))
@@ -144,7 +146,7 @@ final class LayoutApplier {
         var spots: [String: IconMover.Spot] = [:]
         for w in MenuBarGeometry.row(on: screen, windows: windows) where w.isOnScreen {
             let token: String
-            if w.bounds == found.hidden { token = "│" } else if let a = found.always, w.bounds == a { token = "‖" } else if found.run.contains(w.bounds) { continue } else { token = "w\(w.id)" }
+            if w.bounds == found.hidden { token = "│" } else if let a = found.always, w.bounds == a { token = "‖" } else if w.bounds == found.toggle { continue } else { token = "w\(w.id)" }
             order.append(token)
             spots[token] = IconMover.Spot(window: w.id, frame: w.bounds)
         }

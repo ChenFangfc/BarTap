@@ -13,6 +13,9 @@ public enum RevealLevel: Int, Comparable, CustomStringConvertible {
 /// What caused the current user-initiated reveal. Determines how it ends.
 public enum RevealSource: String, Equatable {
     case click, hotkey, hover, scroll, emptyClick, command, search, shelf
+    /// Opened from the BarTap button by resting on it or clicking it: closed by the pointer leaving
+    /// or a click elsewhere (HoverClickPresenter), never by a timer.
+    case button
 }
 
 /// Pure state machine for the reveal level. The app feeds it events; whoever owns it applies
@@ -92,6 +95,8 @@ public enum RehidePolicy {
     public static func delay(for source: RevealSource?, autoRehide: Bool, delay: TimeInterval) -> TimeInterval? {
         guard let source, autoRehide else { return nil }
         switch source {
+        case .button:
+            return nil
         case .hover:
             // Hover reveals end when the pointer leaves the menu bar; this is only a backstop.
             return max(delay, 2)

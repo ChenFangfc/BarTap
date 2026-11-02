@@ -34,9 +34,10 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 
 **Organize**
 - Hide icons behind the toggle. An optional ‖ section keeps some hidden for good.
-- Reveal them with a click, hover, scroll or hotkey (⌃⌥⌘B). They re-hide on their own.
+- Rest the pointer on the BarTap button to peek at the hidden icons: they hide again when it leaves. Click it and they stay until you click elsewhere. Scrolling and a hotkey (⌃⌥⌘B) work too.
 - On a notched Mac, a click can open the shelf: a Bartender-style dropdown with the hidden icons, real images included. Click one to open its menu.
-- Arrange the whole menu bar in **Settings › Layout**: real icons in rows for Shown, Hidden and Always Hidden. Drag icons between the rows and along them, then click Apply.
+- Arrange the whole menu bar in **Settings › Layout**: real icons in rows for Shown, Hidden and Always Hidden, BarTap's own stats items included. Drag icons between the rows and along them, then click Apply. Only the icons you moved move.
+- Pick the expand/collapse button: the BarTap logo, an arrow, a dot, an ellipsis, lines or a grid.
 - One arrangement for every display: a wide screen hides exactly what a narrow one hides. If a display is too narrow for every shown icon, Settings › Layout names it.
 - Search any menu bar icon (⌃⌥⌘F).
 - Rules reveal icons on a large display, in chosen apps, on low battery or when you're offline.
@@ -48,13 +49,14 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - **Bluetooth**: paired devices and their batteries (AirPods left, right and case too); connect or disconnect with one click.
 - **3-in-1**: battery, Wi-Fi and volume in one small icon.
 - **Battery power flow**: adapter, Mac and battery in watts, plus health, cycles and which apps use the energy.
-- Dropdowns with history graphs, per-core load, top processes, Wi-Fi details, daily and monthly data use, temperatures, fans, power, battery health and Bluetooth device batteries.
+- Details open when you rest the pointer on an item (passing over doesn't count) and close when it leaves; a click keeps them open until you click elsewhere. Inside: history graphs, per-core load, top processes, Wi-Fi details, daily and monthly data use, temperatures, fans, power, battery health and Bluetooth device batteries.
 - Alerts for a lost connection, a full battery, high CPU or heat, memory pressure, a low disk and a low battery.
 - World clocks, a calendar, °F and bits. Combine all stats into one item to save space by the notch.
 
 **Video downloads**
-- Paste a link to download a video or its audio from YouTube and the many other sites [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports. Pick Best, 1080p, 720p, audio only or MP3; watch the progress; open the file in Finder.
-- BarTap uses yt-dlp from Homebrew, or fetches its official release from GitHub (checksum verified) when you ask. Download only videos you have the right to.
+- Paste or drop a link, pick one of the qualities the video really has, the format and where to save, and download. Pause, resume or cancel; open the file when it's done.
+- Options when you need them: subtitles, playlists, a time range, cover and chapters, skipping sponsor segments, signing in through your browser, a speed limit and file names.
+- Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp): BarTap uses yours from Homebrew, or fetches its official release (checksum verified) when you ask. Download only what you have the right to.
 
 **AI usage**
 - Tokens and cost of Claude Code, Codex, Gemini CLI, OpenCode, Kilo Code, Qwen Code and Kimi Code, read from their logs on your Mac. No API keys, no sign-in, nothing uploaded.

@@ -52,7 +52,7 @@ final class RevealController {
 
     /// An explicit request to hide overrides a watchdog cooldown (the user can see the result).
     private func clearCooldownOnUserIntent(_ source: RevealSource) {
-        guard toggleUndrawn, [.click, .hotkey, .command].contains(source) else { return }
+        guard toggleUndrawn, [.click, .hotkey, .command, .button].contains(source) else { return }
         toggleUndrawn = false
         blockedUntil = .distantPast
     }

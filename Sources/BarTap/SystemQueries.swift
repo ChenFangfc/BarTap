@@ -59,7 +59,7 @@ enum SystemQueries {
                 height = bar.bounds.height
             }
             let id = (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-            return ScreenInfo(id: id, frame: cg, menuBarHeight: height, notch: notch)
+            return ScreenInfo(id: id, frame: cg, menuBarHeight: height, notch: notch, asleep: CGDisplayIsAsleep(id) != 0)
         }
     }
 

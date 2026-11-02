@@ -29,6 +29,11 @@ final class LineProcess {
     var onExit: ((Int32) -> Void)?
     /// A line without a newline is dropped past this, so memory stays bounded.
     private static let maxLine = 64 * 1024
+    /// Keep stdout whole instead of splitting it into lines (a JSON document); stderr still
+    /// arrives line by line. Capped, so a runaway program can't fill memory.
+    var collectsOutput = false
+    private(set) var output = Data()
+    private static let maxOutput = 64 * 1024 * 1024
 
     init(_ executable: String, _ arguments: [String], environment: [String: String]) {
         process.executableURL = URL(fileURLWithPath: executable)
@@ -70,6 +75,13 @@ final class LineProcess {
     }
 
     private func received(_ data: Data, stream: Int) {
+        if stream == 0 && collectsOutput {
+            lock.lock()
+            if output.count + data.count <= Self.maxOutput { output.append(data) }
+            lock.unlock()
+            if data.isEmpty { group.leave() }
+            return
+        }
         var lines: [String] = []
         lock.lock()
         var buffer = pending[stream]
@@ -222,44 +234,31 @@ final class VideoTools {
 
     // MARK: Text
 
-    /// "yt-dlp 2026.03.17 · ffmpeg found · Deno found".
-    var summary: String {
+    /// For Settings › Download component: "2026.10.26", "2026.03.17 · Homebrew", "Not installed".
+    var statusLine: String {
         let s = status
-        if s.path == nil { return lookedUp ? L("yt-dlp isn't installed") : L("Checking yt-dlp…") }
-        guard let v = s.version else { return s.checking ? L("Checking yt-dlp…") : L("yt-dlp didn't start") }
-        var parts = ["yt-dlp \(v)", s.ffmpeg != nil ? L("ffmpeg found") : L("no ffmpeg")]
-        if v.hasJSRuntimes { parts.append(s.js.map { L("%@ found", $0.displayName) } ?? L("no JavaScript runtime")) }
-        return parts.joined(separator: " · ")
-    }
-
-    /// Where the copy in use comes from, for Settings.
-    var sourceText: String? {
-        guard let path = status.path, let source = status.source else { return nil }
-        switch source {
-        case .managed: return L("Downloaded by BarTap")
-        case .homebrew: return L("Installed with Homebrew")
-        case .custom: return L("Chosen by you: %@", (path as NSString).abbreviatingWithTildeInPath)
-        case .external: return (path as NSString).abbreviatingWithTildeInPath
+        guard s.path != nil else { return lookedUp ? L("Not installed") : L("Checking…") }
+        guard let v = s.version else { return s.checking ? L("Checking…") : L("Doesn't start") }
+        switch s.source {
+        case .homebrew?: return "\(v) · Homebrew"
+        case .custom?: return "\(v) · " + L("Chosen by you")
+        case .external?: return "\(v) · " + L("Installed separately")
+        default: return v.description
         }
     }
 
-    /// What is missing or old, most important first.
-    func hints(compact: Bool) -> [String] {
+    /// What is missing or old, most important first; empty when all is well.
+    var problems: [String] {
         guard status.path != nil, let v = status.version else { return [] }
-        var h: [String] = []
+        var p: [String] = []
         if v < YTDLPVersion.minimum {
-            h.append(L("This yt-dlp is too old for BarTap. Update it."))
+            p.append(L("Too old for BarTap. Update it."))
         } else if v.isStale() {
-            h.append(L("This yt-dlp is %d days old. Sites change often; update it if downloads fail.", v.ageInDays() ?? 0))
+            p.append(L("Over 3 months old. Update it if downloads fail."))
         }
-        if v.hasJSRuntimes && status.js == nil { h.append(L("YouTube needs a JavaScript runtime for all formats: brew install deno")) }
-        if !compact {
-            if status.ffmpeg == nil {
-                h.append(L("Without ffmpeg, videos are H.264 only (YouTube: up to 1080p) and MP3 is unavailable: brew install ffmpeg"))
-            }
-            if status.source == .homebrew { h.append(L("Update with brew upgrade yt-dlp")) }
-        }
-        return h
+        if v.hasJSRuntimes && status.js == nil { p.append(L("For YouTube, install Deno: brew install deno")) }
+        if status.ffmpeg == nil { p.append(L("For HD video, MP3 and extras, install ffmpeg: brew install ffmpeg")) }
+        return p
     }
 
     // MARK: BarTap's own copy
@@ -343,7 +342,7 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
         queue.maxConcurrentOperationCount = 1
         let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
         self.session = session
-        report(.running(L("Checking the latest release…"), nil))
+        report(.running(L("Checking for updates…"), nil))
         let t = session.dataTask(with: YTDLPRelease.latestSums) { [weak self] data, response, error in
             self?.receivedSums(data, response, error)
         }
@@ -379,7 +378,7 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
         guard !isCancelled else { end(.idle); return }
         guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data,
               let sum = ChecksumList.sha256(for: YTDLPRelease.asset, in: String(decoding: data, as: UTF8.self)) else {
-            end(.failed(error.map { L("Couldn't reach GitHub: %@", $0.localizedDescription) } ?? L("Couldn't read yt-dlp's release checksums.")))
+            end(.failed(error.map { L("Couldn't reach GitHub: %@", $0.localizedDescription) } ?? L("Couldn't read the release checksums.")))
             return
         }
         expected = sum
@@ -391,10 +390,10 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
             }
             check { installed in
                 if let tag = self.tag, let installed, installed.description == tag {
-                    self.end(.finished(L("yt-dlp is up to date.")))
+                    self.end(.finished(L("Already up to date.")))
                     return
                 }
-                self.report(.running(L("Downloading yt-dlp %@…", self.tag ?? ""), 0))
+                self.report(.running(L("Downloading %@…", self.tag ?? ""), 0))
                 let t = self.session?.downloadTask(with: YTDLPRelease.assetURL(tag: self.tag))
                 self.task = t
                 t?.resume()
@@ -408,13 +407,13 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
         let percent = Int(100 * totalBytesWritten / totalBytesExpectedToWrite)
         guard percent != lastPercent else { return }
         lastPercent = percent
-        report(.running(L("Downloading yt-dlp %@…", tag ?? ""), Double(percent) / 100))
+        report(.running(L("Downloading %@…", tag ?? ""), Double(percent) / 100))
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         // The system deletes `location` when this returns.
         guard (downloadTask.response as? HTTPURLResponse)?.statusCode == 200 else {
-            problem = L("GitHub didn't return yt-dlp (HTTP %d).", (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0)
+            problem = L("GitHub didn't return the download (HTTP %d).", (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0)
             return
         }
         let kept = directory.appendingPathComponent(".yt-dlp.zip")
@@ -434,10 +433,10 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
         if let error { end(.failed(L("Download failed: %@", error.localizedDescription))); return }
         guard let archive, problem == nil else { end(.failed(problem ?? L("Download failed."))); return }
         guard let expected, (try? ManagedInstaller.sha256(of: archive)) == expected else {
-            end(.failed(L("The download didn't match the published checksum, so it was discarded.")))
+            end(.failed(L("The download didn't match its published checksum and was discarded.")))
             return
         }
-        report(.running(L("Unpacking yt-dlp…"), nil))
+        report(.running(L("Unpacking…"), nil))
         try? FileManager.default.removeItem(at: unpacked)
         let ditto = Process()
         ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -454,21 +453,21 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
             return
         }
         guard ditto.terminationStatus == 0, VideoTools.isExecutable(program) else {
-            end(.failed(L("The downloaded yt-dlp didn't run.")))
+            end(.failed(L("The new version didn't run.")))
             return
         }
         try? FileManager.default.removeItem(at: archive)
         self.archive = nil
         // The first launch includes macOS's one-time check of the new files (several seconds).
-        report(.running(L("Checking the new yt-dlp…"), nil))
+        report(.running(L("Checking the new version…"), nil))
         DispatchQueue.main.async {
             VideoTools.readVersion(program) { version in
-                guard let version, !self.isCancelled else { self.end(.failed(L("The downloaded yt-dlp didn't run."))); return }
+                guard let version, !self.isCancelled else { self.end(.failed(L("The new version didn't run."))); return }
                 guard self.swapIntoPlace() else {
                     self.end(.failed(String(cString: strerror(errno))))
                     return
                 }
-                self.end(.finished(L("Installed yt-dlp %@.", version.description)))
+                self.end(.finished(L("Installed %@.", version.description)))
             }
         }
     }
@@ -494,17 +493,20 @@ private final class ManagedInstaller: NSObject, URLSessionDownloadDelegate {
 
 final class DownloadJob {
     enum State: Equatable {
-        case queued, running, finishing, done, failed, cancelled
+        case queued, running, finishing, paused, done, failed, cancelled
+        /// Waiting or working; a paused job is neither.
         var isActive: Bool { self == .queued || self == .running || self == .finishing }
+        var isFinished: Bool { self == .done || self == .failed || self == .cancelled }
     }
 
     let id = UUID()
-    let url: String
-    let preset: VideoPreset
-    let folder: String
-    let playlists: Bool
+    let request: VideoRequest
+    var url: String { request.url }
+    var folder: String { request.folder }
     var state = State.queued
     var title: String?
+    /// From the panel's preview, already scaled down.
+    var thumbnail: NSImage?
     var meter = DownloadMeter()
     /// Post-processing under way ("Merging video and audio…").
     var step: String?
@@ -513,44 +515,56 @@ final class DownloadJob {
     /// Why it failed, or what went wrong in a playlist that still produced files.
     var message: String?
     var item: (index: Int, count: Int)?
+    /// The file was already in the folder; nothing was downloaded.
+    var alreadyThere = false
 
     // While running.
     fileprivate var runner: LineProcess?
     fileprivate var remux: MediaRemux?
-    fileprivate var started = Date()
+    /// The first start: pausing and resuming keep it, so clean-up still knows this job's files.
+    fileprivate var firstStarted: Date?
     fileprivate var withoutFFmpeg = false
     fileprivate var stems: Set<String> = []
     fileprivate var merges: [(target: String, parts: [String])] = []
     fileprivate var dashAudio = false
     fileprivate var cancelling = false
+    fileprivate var pausing = false
+    fileprivate var sawProgress = false
     fileprivate var tail: [String] = []
 
-    init(url: String, preset: VideoPreset, folder: String, playlists: Bool) {
-        self.url = url
-        self.preset = preset
-        self.folder = folder
-        self.playlists = playlists
+    init(request: VideoRequest, title: String? = nil, thumbnail: NSImage? = nil) {
+        self.request = request
+        self.title = title
+        self.thumbnail = thumbnail
     }
 
     var displayTitle: String { title ?? url }
 
-    fileprivate func reset() {
+    /// Before running again; `fresh` also forgets the first start (after Cancel or a failure,
+    /// whose files were removed).
+    fileprivate func reset(fresh: Bool) {
         state = .queued
         meter = DownloadMeter()
         step = nil
         files = []
         message = nil
         item = nil
-        stems = []
+        alreadyThere = false
         merges = []
         dashAudio = false
         cancelling = false
+        pausing = false
+        sawProgress = false
         tail = []
+        if fresh {
+            firstStarted = nil
+            stems = []
+        }
     }
 }
 
-/// The download queue: at most two yt-dlp processes at a time; finished jobs are kept in memory
-/// only (the last 20), so nothing about downloads is ever written to disk by BarTap itself.
+/// The download queue: at most two downloads at a time; finished jobs are kept in memory only
+/// (the last 20), so nothing about downloads is ever written to disk by BarTap itself.
 final class VideoDownloads {
     static let shared = VideoDownloads()
     static let maxRunning = 2
@@ -569,8 +583,8 @@ final class VideoDownloads {
     var folder: String { settings.videoFolder.isEmpty ? Self.defaultFolder : settings.videoFolder }
     var panelIsVisible: Bool { panel?.isVisible ?? false }
 
-    /// Opens the download panel (menu item "Download Video…"). `prefill` goes into the link field;
-    /// without it, a link on the clipboard is offered (see DownloadPanel.present).
+    /// Opens the download panel (menu item "Download Video…"). `prefill` goes into the link
+    /// field and its details are fetched right away.
     func showPanel(prefill: String? = nil) {
         let p = panel ?? DownloadPanel(model: self)
         p.onClose = { [weak self] in
@@ -583,12 +597,23 @@ final class VideoDownloads {
         p.present(prefill: prefill)
     }
 
+    /// Remembers where the user saves, for the panel's Save to menu.
+    func choose(folder path: String) {
+        settings.videoFolder = path == Self.defaultFolder ? "" : path
+        settings.videoRecentFolders = RecentFolders.adding(path, to: settings.videoRecentFolders)
+    }
+
+    /// A download with the user's current choices; the quality is the default one.
+    func request(url: String, quality: VideoQuality? = nil) -> VideoRequest {
+        VideoRequest(url: url, quality: quality ?? settings.videoQuality, folder: folder, options: settings.videoOptions)
+    }
+
     @discardableResult
-    func add(url: String, preset: VideoPreset) -> DownloadJob {
-        if let same = jobs.first(where: { $0.url == url && $0.preset == preset && $0.state.isActive }) { return same }
-        let job = DownloadJob(url: url, preset: preset, folder: folder, playlists: settings.videoPlaylists)
+    func add(_ request: VideoRequest, title: String? = nil, thumbnail: NSImage? = nil) -> DownloadJob {
+        if let same = jobs.first(where: { $0.request == request && ($0.state.isActive || $0.state == .paused) }) { return same }
+        let job = DownloadJob(request: request, title: title, thumbnail: thumbnail)
         jobs.insert(job, at: 0)
-        let finished = jobs.filter { !$0.state.isActive }
+        let finished = jobs.filter { $0.state.isFinished }
         if finished.count > Self.maxFinished {
             let drop = Set(finished.suffix(finished.count - Self.maxFinished).map(\.id))
             jobs.removeAll { drop.contains($0.id) }
@@ -598,20 +623,36 @@ final class VideoDownloads {
         return job
     }
 
+    /// Stops the download but keeps what arrived; Resume continues the partial file.
+    func pause(_ job: DownloadJob) {
+        guard job.state == .running, !job.cancelling else { return }
+        job.pausing = true
+        job.step = L("Pausing…")
+        changed(job)
+        interrupt(job)
+    }
+
+    func resume(_ job: DownloadJob) {
+        guard job.state == .paused else { return }
+        job.reset(fresh: false)
+        changed(job)
+        VideoTools.shared.refresh { [weak self] in self?.pump() }
+    }
+
     func cancel(_ job: DownloadJob) {
         switch job.state {
         case .queued:
             job.state = .cancelled
             changed(job)
+        case .paused:
+            job.cancelling = true
+            stop(job, as: .cancelled)
         case .running:
             job.cancelling = true
+            job.pausing = false
             job.step = L("Cancelling…")
             changed(job)
-            // Escalate only against this process: a quick Retry starts a new one.
-            let runner = job.runner
-            runner?.signal(SIGINT)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak runner] in runner?.signal(SIGTERM) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak runner] in runner?.signal(SIGKILL) }
+            interrupt(job)
         case .finishing:
             job.cancelling = true
             job.remux?.cancel()
@@ -620,25 +661,49 @@ final class VideoDownloads {
         }
     }
 
+    /// SIGINT first, like ⌃C in Terminal; escalation only against this process (a quick
+    /// Resume or Retry starts a new one).
+    private func interrupt(_ job: DownloadJob) {
+        let runner = job.runner
+        runner?.signal(SIGINT)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak runner] in runner?.signal(SIGTERM) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak runner] in runner?.signal(SIGKILL) }
+    }
+
     func retry(_ job: DownloadJob) {
-        guard !job.state.isActive else { return }
-        job.reset()
+        guard job.state.isFinished else { return }
+        job.reset(fresh: true)
         changed(job)
         VideoTools.shared.refresh { [weak self] in self?.pump() }
     }
 
+    func remove(_ job: DownloadJob) {
+        guard job.state.isFinished else { return }
+        jobs.removeAll { $0 === job }
+        changed(nil)
+    }
+
     func clearFinished() {
-        jobs.removeAll { !$0.state.isActive }
+        jobs.removeAll { $0.state.isFinished }
         changed(nil)
     }
 
     func reveal(_ job: DownloadJob) {
-        let existing = job.files.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        let existing = existingFiles(job)
         if existing.isEmpty {
             NSWorkspace.shared.open(URL(fileURLWithPath: job.folder, isDirectory: true))
         } else {
             NSWorkspace.shared.activateFileViewerSelecting(existing)
         }
+    }
+
+    func open(_ job: DownloadJob) {
+        guard let first = existingFiles(job).first else { reveal(job); return }
+        NSWorkspace.shared.open(first)
+    }
+
+    func existingFiles(_ job: DownloadJob) -> [URL] {
+        job.files.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
     }
 
     /// Queued jobs waited for a version check or an install.
@@ -649,7 +714,7 @@ final class VideoDownloads {
     /// For headless renders only.
     func setJobsForPreview(_ list: [DownloadJob]) { jobs = list }
 
-    /// yt-dlp's environment: the install folders on PATH (an app opened from Finder gets
+    /// The component's environment: the install folders on PATH (an app opened from Finder gets
     /// launchd's bare PATH) and unbuffered UTF-8 output, so progress arrives line by line.
     static func environment(includeInstallDirs: Bool = true) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
@@ -659,11 +724,11 @@ final class VideoDownloads {
         return env
     }
 
-    /// For applicationWillTerminate: tells every yt-dlp (and its helpers) to stop, so none keeps
-    /// running after BarTap quits.
+    /// For applicationWillTerminate: tells every download (and its helpers) to stop, so none
+    /// keeps running after BarTap quits. Partial files stay; the same download later resumes them.
     func stopAll() {
         for job in jobs where job.state == .running {
-            job.cancelling = true
+            job.pausing = true
             job.runner?.signal(SIGINT)
         }
         jobs.forEach { $0.remux?.cancel() }
@@ -682,6 +747,56 @@ final class VideoDownloads {
         NotificationCenter.default.post(name: .barTapDownloadsChanged, object: job)
     }
 
+    // MARK: Details
+
+    /// Fetches a link's details (`-J`); `done` runs on the main queue unless cancelled.
+    final class InfoFetch {
+        fileprivate var runner: LineProcess?
+        fileprivate(set) var cancelled = false
+        func cancel() {
+            cancelled = true
+            runner?.signal(SIGTERM)
+        }
+    }
+
+    @discardableResult
+    func fetchInfo(url: String, browser: CookieBrowser?, done: @escaping (Result<VideoInfo, InfoError>) -> Void) -> InfoFetch {
+        let fetch = InfoFetch()
+        VideoTools.shared.refresh {
+            guard !fetch.cancelled else { return }
+            guard let chain = VideoTools.shared.status.toolchain else {
+                done(.failure(InfoError(VideoTools.shared.status.path == nil ? L("The download component isn't installed.") : L("The download component doesn't start."))))
+                return
+            }
+            let p = LineProcess(chain.ytdlp, VideoArguments.info(url: url, tools: chain, browser: browser),
+                                environment: Self.environment(includeInstallDirs: !VideoTools.ignoreFFmpeg))
+            p.collectsOutput = true
+            var tail: [String] = []
+            p.onLine = { line, isError in
+                guard isError else { return }
+                tail.append(line)
+                if tail.count > 40 { tail.removeFirst() }
+            }
+            p.onExit = { status in
+                fetch.runner = nil
+                guard !fetch.cancelled else { return }
+                if status == 0, let info = VideoInfo.parse(p.output) {
+                    done(.success(info))
+                } else {
+                    done(.failure(InfoError(DownloadErrorText.friendly(tail, exitCode: status))))
+                }
+            }
+            fetch.runner = p
+            do { try p.start() } catch { done(.failure(InfoError(error.localizedDescription))) }
+        }
+        return fetch
+    }
+
+    struct InfoError: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
+
     // MARK: Running
 
     private func pump() {
@@ -690,17 +805,16 @@ final class VideoDownloads {
         let tools = VideoTools.shared
         guard let chain = tools.status.toolchain else {
             if tools.status.checking || tools.isInstalling { return }   // refresh/install calls back
-            fail(next, tools.status.path == nil
-                 ? L("yt-dlp isn't installed. Download it below, or in Settings › Power-ups.")
-                 : L("yt-dlp didn't start. Choose another copy in Settings › Power-ups."))
+            fail(next, tools.status.path == nil ? L("The download component isn't installed.") : L("The download component doesn't start."))
             return
         }
         if let v = chain.version, v < YTDLPVersion.minimum {
-            fail(next, L("This yt-dlp is too old for BarTap. Update it."))
+            fail(next, L("The download component is too old. Update it."))
             return
         }
-        if next.preset.needsFFmpeg && chain.ffmpeg == nil {
-            fail(next, L("MP3 needs ffmpeg: brew install ffmpeg"))
+        let r = next.request
+        if r.quality.isAudio && r.options.audioFormat != .m4a && chain.ffmpeg == nil {
+            fail(next, L("MP3 and Opus need ffmpeg: brew install ffmpeg"))
             return
         }
         start(next, chain)
@@ -708,11 +822,10 @@ final class VideoDownloads {
     }
 
     private func start(_ job: DownloadJob, _ tools: VideoToolchain) {
-        let request = VideoRequest(url: job.url, preset: job.preset, folder: job.folder, playlists: job.playlists)
-        let p = LineProcess(tools.ytdlp, VideoArguments.make(request, tools: tools),
-                            environment: Self.environment(includeInstallDirs: !VideoTools.ignoreFFmpeg))
+        let args = VideoArguments.make(job.request, tools: tools, preferredLanguage: Locale.preferredLanguages.first ?? "en")
+        let p = LineProcess(tools.ytdlp, args, environment: Self.environment(includeInstallDirs: !VideoTools.ignoreFFmpeg))
         job.state = .running
-        job.started = Date()
+        if job.firstStarted == nil { job.firstStarted = Date() }
         job.withoutFFmpeg = tools.ffmpeg == nil
         p.onLine = { [weak self, weak job] line, isError in
             guard let self, let job else { return }
@@ -727,7 +840,7 @@ final class VideoDownloads {
             try p.start()
         } catch {
             job.runner = nil
-            fail(job, L("yt-dlp didn't start: %@", error.localizedDescription))
+            fail(job, L("The download component doesn't start: %@", error.localizedDescription))
             return
         }
         changed(job)
@@ -738,7 +851,7 @@ final class VideoDownloads {
             job.tail.append(line)
             if job.tail.count > 40 { job.tail.removeFirst(job.tail.count - 40) }
         }
-        guard let event = DownloadLine.parse(line), !job.cancelling else { return }
+        guard let event = DownloadLine.parse(line), !job.cancelling, !job.pausing else { return }
         switch event {
         case .begin(let item):
             job.meter.begin(item)
@@ -748,27 +861,38 @@ final class VideoDownloads {
             job.step = nil
         case .progress(let p):
             job.meter.update(p)
+            job.sawProgress = true
             job.step = nil
         case .step(let name, let finished):
             // Steps run back to back; the last one stays up until something else happens.
-            if !finished, let title = Self.stepTitle(name, job.preset) { job.step = title }
+            if !finished, let title = Self.stepTitle(name, job.request) { job.step = title }
         case .file(let path):
             job.files.append(path)
             job.stems.insert(Self.stemPath(path))
+            // Nothing downloaded and the file predates the job: it was already in the folder.
+            if !job.sawProgress, let created = (try? FileManager.default.attributesOfItem(atPath: path))?[.creationDate] as? Date,
+               let first = job.firstStarted, created < first {
+                job.alreadyThere = true
+            }
         case .parts(let paths):
             if let target = job.files.last { job.merges.append((target, paths)) }
         case .warning(let text):
             if text.contains("DASH m4a") { job.dashAudio = true }
+            // Errors that --ignore-errors turned into warnings: the video still comes.
+            if text.contains("Unable to download video subtitles") { job.message = L("Some subtitles couldn't be downloaded.") }
         case .error:
             break
         }
         changed(job)
     }
 
-    private static func stepTitle(_ postprocessor: String, _ preset: VideoPreset) -> String? {
+    private static func stepTitle(_ postprocessor: String, _ r: VideoRequest) -> String? {
         switch postprocessor {
         case "Merger": return L("Merging video and audio…")
-        case "ExtractAudio": return preset == .mp3 ? L("Converting to MP3…") : L("Extracting audio…")
+        case "ExtractAudio":
+            return r.options.audioFormat == .m4a ? L("Extracting audio…") : L("Converting to %@…", r.options.audioFormat.title)
+        case "EmbedSubtitle": return L("Adding subtitles…")
+        case "ModifyChapters": return L("Removing sponsor segments…")
         case "MoveFiles": return nil
         default: return L("Finishing…")
         }
@@ -781,6 +905,15 @@ final class VideoDownloads {
     private func ended(_ job: DownloadJob, status: Int32) {
         job.runner = nil
         if job.cancelling { stop(job, as: .cancelled); return }
+        if job.pausing {
+            // Keep everything: the next start continues the partial files.
+            job.pausing = false
+            job.state = .paused
+            job.step = nil
+            changed(job)
+            pump()
+            return
+        }
         if job.files.isEmpty {
             stop(job, as: .failed, DownloadErrorText.friendly(job.tail, exitCode: status))
             return
@@ -790,7 +923,7 @@ final class VideoDownloads {
         finishWithoutFFmpeg(job)
     }
 
-    /// Without ffmpeg, yt-dlp leaves video and audio as two files and YouTube audio in a DASH
+    /// Without ffmpeg, video and audio arrive as two files and YouTube audio in a DASH
     /// container; AVFoundation joins or rewrites them, copying samples (no re-encoding).
     private func finishWithoutFFmpeg(_ job: DownloadJob) {
         let fm = FileManager.default
@@ -852,8 +985,9 @@ final class VideoDownloads {
     }
 
     /// Removes what this job left half-done (".part", ".ytdl", unmerged ".f137.mp4" streams,
-    /// ".temp." files), and nothing that existed before it started.
+    /// ".temp." files), and nothing that existed before it first started.
     private func removeLeftovers(_ job: DownloadJob) {
+        guard let since = job.firstStarted else { return }
         let fm = FileManager.default
         let keep = Set(job.files)
         for dir in Set(job.stems.map { ($0 as NSString).deletingLastPathComponent }) {
@@ -865,7 +999,7 @@ final class VideoDownloads {
             }
             let stems = Set(job.stems.filter { ($0 as NSString).deletingLastPathComponent == dir }.map { ($0 as NSString).lastPathComponent })
             let keepNames = Set(keep.filter { ($0 as NSString).deletingLastPathComponent == dir }.map { ($0 as NSString).lastPathComponent })
-            for name in DownloadLeftovers.select(files, stems: stems, keep: keepNames, since: job.started) {
+            for name in DownloadLeftovers.select(files, stems: stems, keep: keepNames, since: since) {
                 try? fm.removeItem(atPath: dir + "/" + name)
             }
         }

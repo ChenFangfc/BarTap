@@ -305,6 +305,74 @@ enum TrioProbe {
         return s
     }
 
+    // MARK: Presenter
+
+    /// `--presenter-check`: the real HoverClickPresenter (timers, deferred samples) driven by a fake
+    /// pointer through a scripted timeline; no monitors, nothing on screen.
+    static func presenterCheck() {
+        _ = NSApplication.shared
+        let p = HoverClickPresenter()
+        var point = CGPoint(x: 500, y: 500)
+        let itemFrame = CGRect(x: 1000, y: 0, width: 45, height: 33)
+        var panel: CGRect?   // the open details (CG, for simplicity)
+        var log: [(TimeInterval, String)] = []
+        let t0 = ProcessInfo.processInfo.systemUptime
+        func note(_ s: String) { log.append((ProcessInfo.processInfo.systemUptime - t0, s)) }
+        p.pointer = { point }
+        p.inBar = { $0.y < 33 }
+        p.locate = { itemFrame.contains($0) ? StatusItemHitTest.Hit(id: "cpu", frame: itemFrame, screenID: 1) : nil }
+        // The flip between Cocoa and CG coordinates is its own inverse.
+        p.contains = { q in panel.map { $0.contains(SystemQueries.cocoaPoint(fromCG: q)) } ?? false }
+        p.open = { id, mode, frame in
+            panel = CGRect(x: 994, y: 36, width: 300, height: 400)
+            note("open \(id) \(mode) below \(frame.map { "\(Int($0.minX))" } ?? "-")")
+        }
+        p.pin = { note("pin") }
+        p.close = { panel = nil; note("close") }
+        func wait(_ s: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(s)) }
+        // 1. Pass over the item in 0.3 s: nothing.
+        point = CGPoint(x: 1010, y: 10); p.sample(); wait(0.15)
+        point = CGPoint(x: 1030, y: 10); p.sample(); wait(0.15)
+        point = CGPoint(x: 1300, y: 10); p.sample(); wait(0.7)
+        note("-- passed over")
+        // 2. Rest on it: opens after 0.5 s on the timer alone (no more samples).
+        point = CGPoint(x: 1020, y: 12); p.sample(); wait(0.8)
+        // 3. Down into the details through the gap: stays open.
+        point = CGPoint(x: 1020, y: 34); p.sample(); wait(0.1)
+        point = CGPoint(x: 1050, y: 200); p.sample(); wait(0.6)
+        note("-- in the details")
+        // 4. Leave both: closes after the 0.3 s grace, on the timer.
+        point = CGPoint(x: 1700, y: 800); p.sample(); wait(0.6)
+        // 5. Click: opens pinned; leaving doesn't close; another click closes.
+        point = CGPoint(x: 1020, y: 12); p.itemClicked("cpu")
+        point = CGPoint(x: 1700, y: 800); p.sample(); wait(0.8)
+        note("-- pinned, pointer away")
+        point = CGPoint(x: 1020, y: 12); p.itemClicked("cpu")
+        // 6. Resting there after that click doesn't reopen it.
+        p.sample(); wait(0.8)
+        note("-- end")
+        for (t, s) in log { print(String(format: "%5.2f s  %@", t, s)) }
+
+        // What a pointer move costs, on this Mac's real window list.
+        let locator = StatusItemLocator()
+        locator.items = { [StatusItemHitTest.Item(id: "probe", windowName: "tb_stats_probe", proxyFrame: nil)] }
+        let main = SystemQueries.screens().first
+        let inBar = CGPoint(x: (main?.frame.maxX ?? 1000) - 200, y: (main?.frame.minY ?? 0) + 5)
+        let outside = CGPoint(x: inBar.x, y: inBar.y + 400)
+        func ms(_ n: Int, _ body: () -> Void) -> Double {
+            let t = CFAbsoluteTimeGetCurrent()
+            for _ in 0..<n { body() }
+            return (CFAbsoluteTimeGetCurrent() - t) * 1000 / Double(n)
+        }
+        _ = locator.hit(at: inBar)   // first use: display list, window server connection
+        let refresh = ms(20) { locator.expire(); _ = locator.hit(at: inBar) }
+        let cached = ms(2000) { _ = locator.hit(at: inBar) }
+        let away = ms(20000) { _ = locator.inMenuBar(outside) }
+        let pointer = ms(20000) { _ = SystemQueries.pointerCG }
+        print(String(format: "pointer cost: window list refresh %.2f ms (at most 1/s, in a bar only); cached hit test %.4f ms; outside the bars %.5f ms; reading the pointer %.5f ms",
+                     refresh, cached, away, pointer))
+    }
+
     // MARK: CPU
 
     /// Runs the new readers headlessly at the default 1 s interval and reports CPU after a 5 s

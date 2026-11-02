@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
-VERSION="${VERSION:-1.3.0}"
+VERSION="${VERSION:-1.4.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 DIST=dist
 APP="$DIST/BarTap.app"

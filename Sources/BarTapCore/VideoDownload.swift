@@ -1,24 +1,317 @@
 import Foundation
 
-// Pure parts of the video downloader (yt-dlp runs as a separate program; see VideoDownloads.swift).
+// Pure parts of the video downloader. The engine (yt-dlp) runs as a separate program, see
+// VideoDownloads.swift; nothing the user sees names it: it is "the download component".
 
-// MARK: - Presets
+// MARK: - Choices
 
-public enum VideoPreset: String, CaseIterable {
-    case best, upTo1080, upTo720, audio, mp3
+/// A resolution (the frame's smaller side, so a vertical 1080×1920 video is 1080p), or audio only.
+public enum VideoQuality: Hashable {
+    case best
+    case height(Int)
+    case audio
 
-    /// MP3 always re-encodes, which only ffmpeg can do.
-    public var needsFFmpeg: Bool { self == .mp3 }
-    public var isAudio: Bool { self == .audio || self == .mp3 }
+    /// "best", "1080", "audio"; also the presets BarTap 1.3.0 stored.
+    public init?(storage: String) {
+        switch storage {
+        case "best": self = .best
+        case "audio", "mp3": self = .audio
+        case "upTo1080": self = .height(1080)
+        case "upTo720": self = .height(720)
+        default:
+            guard let h = Int(storage), (100...10_000).contains(h) else { return nil }
+            self = .height(h)
+        }
+    }
+
+    public var storage: String {
+        switch self {
+        case .best: return "best"
+        case .height(let h): return String(h)
+        case .audio: return "audio"
+        }
+    }
+
+    public var isAudio: Bool { self == .audio }
+
+    /// What can be chosen before a video's own list is known.
+    public static let common: [VideoQuality] = [.best, .height(2160), .height(1440), .height(1080), .height(720), .height(480), .audio]
 
     public var title: String {
         switch self {
         case .best: return L("Best")
-        case .upTo1080: return L("Up to 1080p")
-        case .upTo720: return L("Up to 720p")
-        case .audio: return L("Audio Only (M4A)")
-        case .mp3: return "MP3"
+        case .height(let h): return "\(h)p"
+        case .audio: return L("Audio Only")
         }
+    }
+}
+
+public enum VideoContainer: String, CaseIterable {
+    case mp4, mkv, webm
+    public var title: String { self == .webm ? "WebM" : rawValue.uppercased() }
+}
+
+public enum AudioFormat: String, CaseIterable {
+    case m4a, mp3, opus
+    public var title: String { self == .opus ? "Opus" : rawValue.uppercased() }
+}
+
+public enum SubtitleMode: String, CaseIterable {
+    case off, file, embed
+}
+
+public enum SponsorMode: String, CaseIterable {
+    case keep, mark, remove
+}
+
+public enum AudioQuality: String, CaseIterable {
+    case best, k320, k192, k128
+    /// `--audio-quality`: 0 is the best variable bit rate.
+    public var argument: String {
+        switch self {
+        case .best: return "0"
+        case .k320: return "320K"
+        case .k192: return "192K"
+        case .k128: return "128K"
+        }
+    }
+    public var kbps: Int { [.best: 245, .k320: 320, .k192: 192, .k128: 128][self]! }
+}
+
+public enum FileNameStyle: String, CaseIterable {
+    case title, titleID, uploaderTitle, dateTitle
+
+    /// Byte limits keep a name (plus ".f137.mp4.part" while downloading) under macOS's 255 bytes.
+    /// A missing uploader or date leaves just the title.
+    public var template: String {
+        switch self {
+        case .title: return "%(title).200B.%(ext)s"
+        case .titleID: return "%(title).180B [%(id)s].%(ext)s"
+        case .uploaderTitle: return "%(uploader,channel&{:.30} – |)s%(title).130B.%(ext)s"
+        case .dateTitle: return "%(upload_date>%Y-%m-%d,release_date>%Y-%m-%d,timestamp>%Y-%m-%d&{} – |)s%(title).180B.%(ext)s"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .title: return L("Title")
+        case .titleID: return L("Title [ID]")
+        case .uploaderTitle: return L("Uploader – Title")
+        case .dateTitle: return L("Date – Title")
+        }
+    }
+}
+
+/// Browsers whose sign-in the download component can use (`--cookies-from-browser`). Arc is
+/// not among them (as of 2026.10.26).
+public enum CookieBrowser: String, CaseIterable {
+    case safari, chrome, firefox, edge, brave, opera, vivaldi, chromium, whale
+
+    public var title: String {
+        switch self {
+        case .safari: return "Safari"
+        case .chrome: return "Chrome"
+        case .firefox: return "Firefox"
+        case .edge: return "Edge"
+        case .brave: return "Brave"
+        case .opera: return "Opera"
+        case .vivaldi: return "Vivaldi"
+        case .chromium: return "Chromium"
+        case .whale: return "Whale"
+        }
+    }
+
+    /// To list only installed browsers.
+    public var bundleID: String {
+        switch self {
+        case .safari: return "com.apple.Safari"
+        case .chrome: return "com.google.Chrome"
+        case .firefox: return "org.mozilla.firefox"
+        case .edge: return "com.microsoft.edgemac"
+        case .brave: return "com.brave.Browser"
+        case .opera: return "com.operasoftware.Opera"
+        case .vivaldi: return "com.vivaldi.Vivaldi"
+        case .chromium: return "org.chromium.Chromium"
+        case .whale: return "com.naver.Whale"
+        }
+    }
+}
+
+public enum SpeedLimit {
+    /// KB/s; 0 is no limit.
+    public static let choices = [0, 500, 1_000, 2_000, 5_000, 10_000]
+    public static func argument(_ kb: Int) -> String { kb % 1_000 == 0 ? "\(kb / 1_000)M" : "\(kb)K" }
+    public static func title(_ kb: Int) -> String {
+        kb <= 0 ? L("No Limit") : kb % 1_000 == 0 ? "\(kb / 1_000) MB/s" : "\(kb) KB/s"
+    }
+}
+
+/// Choices that carry over from one download to the next. Decoding tolerates missing and
+/// unknown values, so an older or newer BarTap's choices never reset the others.
+public struct VideoOptions: Equatable, Codable {
+    public var container = VideoContainer.mp4
+    public var audioFormat = AudioFormat.m4a
+    public var subtitles = SubtitleMode.off
+    /// A language code, "all", or empty for this Mac's language (plus English).
+    public var subtitleLanguage = ""
+    public var autoSubtitles = false
+    public var embedThumbnail = true
+    public var embedMetadata = true
+    public var embedChapters = true
+    public var sponsors = SponsorMode.keep
+    public var browser: CookieBrowser?
+    public var speedLimit = 0
+    public var fileName = FileNameStyle.title
+    public var audioQuality = AudioQuality.best
+    public var liveFromStart = false
+
+    public init() {}
+
+    private enum Key: String, CodingKey {
+        case container, audioFormat, subtitles, subtitleLanguage, autoSubtitles, embedThumbnail, embedMetadata, embedChapters
+        case sponsors, browser, speedLimit, fileName, audioQuality, liveFromStart
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        func text(_ k: Key) -> String? { try? c.decodeIfPresent(String.self, forKey: k) }
+        func flag(_ k: Key, _ d: Bool) -> Bool { (try? c.decodeIfPresent(Bool.self, forKey: k)) ?? d }
+        container = text(.container).flatMap(VideoContainer.init(rawValue:)) ?? .mp4
+        audioFormat = text(.audioFormat).flatMap(AudioFormat.init(rawValue:)) ?? .m4a
+        subtitles = text(.subtitles).flatMap(SubtitleMode.init(rawValue:)) ?? .off
+        subtitleLanguage = text(.subtitleLanguage) ?? ""
+        autoSubtitles = flag(.autoSubtitles, false)
+        embedThumbnail = flag(.embedThumbnail, true)
+        embedMetadata = flag(.embedMetadata, true)
+        embedChapters = flag(.embedChapters, true)
+        sponsors = text(.sponsors).flatMap(SponsorMode.init(rawValue:)) ?? .keep
+        browser = text(.browser).flatMap(CookieBrowser.init(rawValue:))
+        speedLimit = max(0, (try? c.decodeIfPresent(Int.self, forKey: .speedLimit)) ?? 0)
+        fileName = text(.fileName).flatMap(FileNameStyle.init(rawValue:)) ?? .title
+        audioQuality = text(.audioQuality).flatMap(AudioQuality.init(rawValue:)) ?? .best
+        liveFromStart = flag(.liveFromStart, false)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode(container.rawValue, forKey: .container)
+        try c.encode(audioFormat.rawValue, forKey: .audioFormat)
+        try c.encode(subtitles.rawValue, forKey: .subtitles)
+        try c.encode(subtitleLanguage, forKey: .subtitleLanguage)
+        try c.encode(autoSubtitles, forKey: .autoSubtitles)
+        try c.encode(embedThumbnail, forKey: .embedThumbnail)
+        try c.encode(embedMetadata, forKey: .embedMetadata)
+        try c.encode(embedChapters, forKey: .embedChapters)
+        try c.encode(sponsors.rawValue, forKey: .sponsors)
+        try c.encodeIfPresent(browser?.rawValue, forKey: .browser)
+        try c.encode(speedLimit, forKey: .speedLimit)
+        try c.encode(fileName.rawValue, forKey: .fileName)
+        try c.encode(audioQuality.rawValue, forKey: .audioQuality)
+        try c.encode(liveFromStart, forKey: .liveFromStart)
+    }
+}
+
+// MARK: - Ranges
+
+public enum PlaylistChoice: Equatable {
+    case single         // a video link stays one video, even when it is part of a playlist
+    case all
+    case items(String)  // normalized by PlaylistItems
+}
+
+public enum PlaylistItems {
+    /// "1-5, 8, 10-" → "1-5,8,10:" (10- means "10 to the end"); nil if it is not a list of
+    /// numbers and ranges.
+    public static func normalize(_ text: String) -> String? {
+        let parts = text.replacingOccurrences(of: "，", with: ",").replacingOccurrences(of: "、", with: ",")
+            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !parts.isEmpty, parts.count <= 200 else { return nil }
+        var out: [String] = []
+        for p in parts {
+            let ends = p.replacingOccurrences(of: "–", with: "-").replacingOccurrences(of: "~", with: "-")
+                .split(separator: "-", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+            switch ends.count {
+            case 1:
+                guard let n = Int(ends[0]), n >= 1 else { return nil }
+                out.append(String(n))
+            case 2:
+                guard let a = Int(ends[0]), a >= 1 else { return nil }
+                if ends[1].isEmpty { out.append("\(a):"); continue }
+                guard let b = Int(ends[1]), b >= a else { return nil }
+                out.append("\(a)-\(b)")
+            default:
+                return nil
+            }
+        }
+        return out.joined(separator: ",")
+    }
+}
+
+/// A part of the video to download, in seconds.
+public struct ClipRange: Equatable {
+    public var start: Double
+    public var end: Double?   // nil: to the end
+
+    public init(start: Double, end: Double?) {
+        self.start = start
+        self.end = end
+    }
+
+    public enum Input: Equatable {
+        case none            // both fields empty, or the whole video
+        case valid(ClipRange)
+        case invalid
+    }
+
+    /// The two fields: "1:30", "1:02:03", "90", "1:30.5". An empty start is the beginning, an
+    /// empty end (or one past the end) is the end.
+    public static func parse(start: String, end: String, duration: Double? = nil) -> Input {
+        let s = start.trimmingCharacters(in: .whitespaces), e = end.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty && e.isEmpty { return .none }
+        guard let from = s.isEmpty ? 0 : seconds(s) else { return .invalid }
+        var to: Double?
+        if !e.isEmpty {
+            guard let v = seconds(e), v > from else { return .invalid }
+            to = v
+        }
+        if let d = duration, d > 0 {
+            if from >= d { return .invalid }
+            if let t = to, t >= d { to = nil }
+        }
+        return from == 0 && to == nil ? .none : .valid(ClipRange(start: from, end: to))
+    }
+
+    /// "1:30" → 90; "1:02:03.5" → 3723.5; nil for anything else.
+    public static func seconds(_ text: String) -> Double? {
+        let t = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "：", with: ":")
+        let parts = t.split(separator: ":", omittingEmptySubsequences: false)
+        guard (1...3).contains(parts.count) else { return nil }
+        var total = 0.0
+        for (i, p) in parts.enumerated() {
+            // Digits only, a decimal point only in the seconds; after a colon, under 60.
+            let last = i == parts.count - 1
+            guard !p.isEmpty, p.allSatisfy({ ("0"..."9").contains($0) || (last && $0 == ".") }),
+                  let v = Double(p), i == 0 || v < 60 else { return nil }
+            total = total * 60 + v
+        }
+        return total
+    }
+
+    /// `--download-sections`: "*90-150.5", "*90-inf".
+    public var argument: String { "*" + Self.number(start) + "-" + (end.map(Self.number) ?? "inf") }
+
+    private static func number(_ v: Double) -> String {
+        if v == v.rounded() { return String(Int(v)) }
+        var s = String(format: "%.3f", v)
+        while s.hasSuffix("0") { s.removeLast() }
+        return s
+    }
+}
+
+public enum RecentFolders {
+    /// Most recent first, without duplicates.
+    public static func adding(_ path: String, to list: [String], limit: Int = 5) -> [String] {
+        Array(([path] + list.filter { $0 != path }).prefix(limit))
     }
 }
 
@@ -153,74 +446,332 @@ public enum ToolLocator {
 
 // MARK: - Arguments
 
+/// One download.
 public struct VideoRequest: Equatable {
     public var url: String
-    public var preset: VideoPreset
+    public var quality: VideoQuality
     public var folder: String
-    public var playlists: Bool
-    public init(url: String, preset: VideoPreset, folder: String, playlists: Bool) {
-        self.url = url; self.preset = preset; self.folder = folder; self.playlists = playlists
+    public var options: VideoOptions
+    public var playlist: PlaylistChoice
+    public var clip: ClipRange?
+
+    public init(url: String, quality: VideoQuality, folder: String, options: VideoOptions = VideoOptions(),
+                playlist: PlaylistChoice = .single, clip: ClipRange? = nil) {
+        self.url = url; self.quality = quality; self.folder = folder; self.options = options
+        self.playlist = playlist; self.clip = clip
     }
 }
 
 public enum VideoArguments {
-    /// 200 bytes of title keeps names (plus " [id].f123.mp4.part") under macOS's 255-byte limit.
-    public static let fileTemplate = "%(title).200B [%(id)s].%(ext)s"
-
-    // Machine-readable lines. Everything else yt-dlp prints is free text (warnings, errors).
+    // Machine-readable lines. Everything else the component prints is free text (warnings, errors).
     public static let beginTag = "[bartap-begin] "
     public static let progressTag = "[bartap-progress] "
     public static let stepTag = "[bartap-step] "
     public static let fileTag = "[bartap-file] "
     public static let partsTag = "[bartap-parts] "
 
-    /// Same resolution: H.264/AAC in MP4 first (plays in QuickTime and Quick Look), separate
-    /// streams over a muxed one (they are better), the original audio language over dubs.
-    static func sort(_ preset: VideoPreset) -> String {
-        let res: String
-        switch preset {
-        case .upTo1080: res = "res:1080"
-        case .upTo720: res = "res:720"
-        default: res = "res"
+    /// Predictable output for everyone: no personal config files, no update checks.
+    static let base = ["--ignore-config", "--no-update"]
+
+    /// Same resolution: the container's own codecs first (for MP4, H.264/AAC: plays in QuickTime
+    /// and Quick Look), separate streams over a muxed one, the original audio language over dubs.
+    static func sort(_ quality: VideoQuality, _ container: VideoContainer) -> String {
+        var res = "res"
+        if case .height(let h) = quality { res = "res:\(h)" }
+        switch container {
+        case .mp4: return "lang,\(res),fps,+hasaud,ext:mp4:m4a,vcodec:h264,acodec:aac"
+        case .mkv: return "lang,\(res),fps,+hasaud"
+        case .webm: return "lang,\(res),fps,+hasaud,ext:webm:webm"
         }
-        return "lang,\(res),fps,+hasaud,ext:mp4:m4a,vcodec:h264,acodec:aac"
     }
 
-    public static func make(_ r: VideoRequest, tools: VideoToolchain) -> [String] {
+    /// Subtitle languages: the choice, or this Mac's language plus English. Each matches the
+    /// language and its regional or original variants (en, en-US, zh-Hans, en-orig), not machine
+    /// translations from other languages (en-de), which sites rate-limit.
+    static func subtitleLanguages(_ choice: String, preferred: String) -> String {
+        if choice == "all" { return "all,-live_chat" }
+        let codes = choice.isEmpty ? [preferred, "en"] : [choice]
+        var seen: [String] = []
+        for c in codes.map({ String($0.split(separator: "-").first ?? "") }) where !c.isEmpty && !seen.contains(c) { seen.append(c) }
+        return seen.map { "\($0)(-[A-Z][A-Za-z]+|-orig)?" }.joined(separator: ",")
+    }
+
+    static func outputTemplate(_ style: FileNameStyle, playlist: Bool) -> String {
+        // A playlist gets its own folder, its videos numbered in playlist order.
+        playlist ? "%(playlist_title,playlist|Playlist).100B/%(playlist_index&{:03d} - |)s" + style.template : style.template
+    }
+
+    /// `preferredLanguage`: this Mac's first language ("zh-Hans", "en-US"…).
+    public static func make(_ r: VideoRequest, tools: VideoToolchain, preferredLanguage: String = "en") -> [String] {
+        let o = r.options
         let hasFFmpeg = tools.ffmpeg != nil
         // An unknown version is treated as current; BarTap refuses to run one it can't read.
         let version = tools.version
-        var a = ["--ignore-config", "--no-update", "--newline", "--progress", "--no-mtime"]
+        // --ignore-errors: a subtitle or cover that fails must not cost the video itself.
+        var a = base + ["--newline", "--progress", "--no-mtime", "--ignore-errors"]
         if version?.hasProgressDelta ?? true { a += ["--progress-delta", "0.5"] }
         a += ["--progress-template",
               "download:" + progressTag + "%(progress.{status,downloaded_bytes,total_bytes,total_bytes_estimate,speed,eta,fragment_index,fragment_count})j %(info.format_id)s",
               "--progress-template", "postprocess:" + stepTag + "%(progress.postprocessor)s %(progress.status)s",
-              "--print", "before_dl:" + beginTag + "%(.{id,title,format_id,ext,filesize,filesize_approx,_filename,playlist_index,n_entries})j",
+              // Printed before subtitles and covers are written, so clean-up knows their names too.
+              "--print", "video:" + beginTag + "%(.{id,title,format_id,ext,filesize,filesize_approx,_filename,playlist_index,n_entries})j",
               "--print", "after_move:" + fileTag + "%(filepath)s"]
-        switch r.preset {
-        case .best, .upTo1080, .upTo720:
-            a += ["-S", sort(r.preset)]
+
+        switch r.quality {
+        case .best, .height:
             if hasFFmpeg {
-                a += ["-f", "bv*+ba/b", "--merge-output-format", "mp4"]
+                a += ["-S", sort(r.quality, o.container), "-f", "bv*+ba/b"]
+                switch o.container {
+                case .mp4: a += ["--merge-output-format", "mp4", "--remux-video", "mp4"]
+                case .mkv: a += ["--merge-output-format", "mkv", "--remux-video", "mkv"]
+                case .webm: a += ["--merge-output-format", "webm/mkv"]   // MKV when the codecs don't fit WebM
+                }
             } else {
-                // yt-dlp leaves the two streams unmerged without ffmpeg; BarTap joins them with
-                // AVFoundation, which can only copy H.264 + AAC.
-                a += ["-f", "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+                // The two streams stay apart without ffmpeg; BarTap joins them with AVFoundation,
+                // which can only copy H.264 + AAC.
+                a += ["-S", sort(r.quality, .mp4), "-f", "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
                       "--print", "after_move:" + partsTag + "%(requested_formats.:.filepath)j"]
             }
+            if o.subtitles != .off {
+                a += ["--write-subs", "--sub-langs", subtitleLanguages(o.subtitleLanguage, preferred: preferredLanguage),
+                      "--sub-format", "srt/vtt/best"]
+                if o.autoSubtitles { a += ["--write-auto-subs"] }
+                if hasFFmpeg {
+                    // Embedded subtitles leave no separate file behind (the component keeps it when
+                    // --write-subs is given, which generated subtitles need).
+                    a += o.subtitles == .embed ? ["--embed-subs", "--compat-options", "no-keep-subs"] : ["--convert-subs", "srt"]
+                }
+            }
         case .audio:
-            // -x without --audio-format only copies the audio out of a video file, never re-encodes.
-            a += hasFFmpeg ? ["-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba/b", "-x"] : ["-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba"]
-        case .mp3:
-            a += ["-f", "ba[acodec^=mp3]/ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "2"]
+            if hasFFmpeg {
+                // Extraction copies the audio when it already is the format asked for.
+                switch o.audioFormat {
+                case .m4a: a += ["-f", "ba[ext=m4a]/ba/b", "-x", "--audio-format", "m4a"]
+                case .mp3: a += ["-f", "ba/b", "-x", "--audio-format", "mp3"]
+                case .opus: a += ["-f", "ba[acodec=opus]/ba/b", "-x", "--audio-format", "opus"]
+                }
+                a += ["--audio-quality", o.audioQuality.argument]
+            } else {
+                a += ["-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba"]
+            }
         }
-        // --no-playlist only covers "video in a playlist" links; a bare playlist link still
-        // downloads everything, so cap it at its first video.
-        a += r.playlists ? ["--yes-playlist"] : ["--no-playlist", "--playlist-items", "1"]
+
+        if hasFFmpeg {
+            if o.embedMetadata { a += ["--embed-metadata"] }
+            // WebM has no cover art; asking for one would turn the file into MKV.
+            if o.embedThumbnail && (r.quality.isAudio || o.container != .webm) { a += ["--embed-thumbnail"] }
+            if o.embedChapters && !r.quality.isAudio { a += ["--embed-chapters"] }
+            switch o.sponsors {
+            case .keep: break
+            case .mark: a += ["--sponsorblock-mark", "sponsor"]
+            case .remove: a += ["--sponsorblock-remove", "sponsor"]
+            }
+            if let clip = r.clip { a += ["--download-sections", clip.argument, "--force-keyframes-at-cuts"] }
+        }
+        if let b = o.browser { a += ["--cookies-from-browser", b.rawValue] }
+        if o.speedLimit > 0 { a += ["--limit-rate", SpeedLimit.argument(o.speedLimit)] }
+        if o.liveFromStart { a += ["--live-from-start"] }
+
+        let isPlaylist: Bool
+        switch r.playlist {
+        case .single:
+            a += ["--no-playlist"]
+            isPlaylist = false
+        case .all:
+            a += ["--yes-playlist"]
+            isPlaylist = true
+        case .items(let spec):
+            a += ["--yes-playlist", "--playlist-items", spec]
+            isPlaylist = true
+        }
         if let ffmpeg = tools.ffmpeg { a += ["--ffmpeg-location", ffmpeg] }
-        if let js = tools.js, version?.hasJSRuntimes ?? true { a += ["--js-runtimes", "\(js.name):\(js.path)"] }
-        a += ["-P", r.folder, "-o", fileTemplate, "--", r.url]
+        a += runtime(tools)
+        a += ["-P", r.folder, "-o", outputTemplate(o.fileName, playlist: isPlaylist), "--", r.url]
         return a
+    }
+
+    /// The video's details as one JSON document: a playlist lists its entries without
+    /// resolving each one, and a video inside a playlist stays a video.
+    public static func info(url: String, tools: VideoToolchain, browser: CookieBrowser?) -> [String] {
+        var a = base + ["-J", "--flat-playlist", "--no-playlist"]
+        if let browser { a += ["--cookies-from-browser", browser.rawValue] }
+        return a + runtime(tools) + ["--", url]
+    }
+
+    private static func runtime(_ tools: VideoToolchain) -> [String] {
+        guard let js = tools.js, tools.version?.hasJSRuntimes ?? true else { return [] }
+        return ["--js-runtimes", "\(js.name):\(js.path)"]
+    }
+}
+
+// MARK: - Video details
+
+/// What one resolution would weigh, per container.
+public struct QualityOption: Equatable {
+    public var height: Int
+    public var highFrameRate: Bool
+    public var bytes: [VideoContainer: Int64]
+
+    public init(height: Int, highFrameRate: Bool, bytes: [VideoContainer: Int64]) {
+        self.height = height; self.highFrameRate = highFrameRate; self.bytes = bytes
+    }
+
+    /// "1080p", "2160p60".
+    public var title: String { "\(height)p" + (highFrameRate ? "60" : "") }
+}
+
+/// The parts of `-J` the panel shows.
+public struct VideoInfo: Equatable {
+    public var title: String
+    public var uploader: String?
+    public var duration: Double?
+    public var thumbnail: String?
+    public var isLive: Bool
+    /// Set for a playlist: how many videos it has.
+    public var playlistCount: Int?
+    /// Largest first; empty when not known (playlists, single-file links).
+    public var qualities: [QualityOption]
+    public var audioBytes: [AudioFormat: Int64]
+    public var subtitles: [String]
+    public var autoSubtitles: [String]
+
+    public var isPlaylist: Bool { playlistCount != nil }
+
+    public init(title: String, uploader: String? = nil, duration: Double? = nil, thumbnail: String? = nil, isLive: Bool = false,
+                playlistCount: Int? = nil, qualities: [QualityOption] = [], audioBytes: [AudioFormat: Int64] = [:],
+                subtitles: [String] = [], autoSubtitles: [String] = []) {
+        self.title = title; self.uploader = uploader; self.duration = duration; self.thumbnail = thumbnail; self.isLive = isLive
+        self.playlistCount = playlistCount; self.qualities = qualities; self.audioBytes = audioBytes
+        self.subtitles = subtitles; self.autoSubtitles = autoSubtitles
+    }
+
+    public static func parse(_ data: Data) -> VideoInfo? {
+        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        let isPlaylist = (o["_type"] as? String) == "playlist"
+        let title = (o["title"] as? String) ?? (o["id"] as? String) ?? ""
+        let uploader = [o["uploader"], o["channel"], o["uploader_id"]].compactMap { $0 as? String }.first { !$0.isEmpty }
+        var thumbnail = o["thumbnail"] as? String
+        if thumbnail == nil, let list = o["thumbnails"] as? [[String: Any]] { thumbnail = list.last?["url"] as? String }
+        let entries = o["entries"] as? [Any]
+        if isPlaylist, thumbnail == nil, let first = entries?.first as? [String: Any] {
+            thumbnail = (first["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
+        }
+        let duration = Self.double(o["duration"])
+        let live = (o["live_status"] as? String) == "is_live" || (o["is_live"] as? Bool) == true
+        var info = VideoInfo(title: title, uploader: uploader, duration: duration, thumbnail: thumbnail, isLive: live)
+        if isPlaylist {
+            info.playlistCount = Self.int(o["playlist_count"]).map(Int.init) ?? entries?.count ?? 0
+            return info
+        }
+        info.subtitles = ((o["subtitles"] as? [String: Any]) ?? [:]).keys.filter { $0 != "live_chat" }.sorted()
+        info.autoSubtitles = ((o["automatic_captions"] as? [String: Any]) ?? [:]).keys.sorted()
+        let formats = (o["formats"] as? [[String: Any]] ?? []).compactMap { Format($0, duration: duration) }
+        info.qualities = qualities(formats)
+        info.audioBytes = audioBytes(formats, duration: duration)
+        return info
+    }
+
+    // MARK: Format list
+
+    struct Format {
+        var ext: String
+        var vcodec: String?   // nil when the site doesn't say
+        var acodec: String?
+        var res: Int?
+        var fps: Double?
+        var bytes: Int64?
+        var tbr: Double
+        /// HLS/DASH playlists and dynamic-range-compressed audio rank below plain files.
+        var streamed: Bool
+        var compressed: Bool
+
+        var hasVideo: Bool { vcodec.map { $0 != "none" } ?? (res != nil) }
+        var hasAudio: Bool { acodec.map { $0 != "none" } ?? (res == nil) }
+
+        init?(_ f: [String: Any], duration: Double?) {
+            ext = f["ext"] as? String ?? ""
+            let note = (f["format_note"] as? String ?? "").lowercased()
+            // Storyboards (preview tiles) and protected formats can't be downloaded as video.
+            if ext == "mhtml" || note.contains("storyboard") || (f["has_drm"] as? Bool) == true { return nil }
+            vcodec = f["vcodec"] as? String
+            acodec = f["acodec"] as? String
+            if vcodec == "none" && acodec == "none" { return nil }
+            let w = VideoInfo.int(f["width"]).map(Int.init), h = VideoInfo.int(f["height"]).map(Int.init)
+            res = w.flatMap { w in h.map { min(w, $0) } } ?? h
+            fps = VideoInfo.double(f["fps"])
+            let rate = VideoInfo.double(f["tbr"]) ?? 0
+            tbr = rate
+            // kbit/s × length when the site gives no size.
+            bytes = VideoInfo.int(f["filesize"]) ?? VideoInfo.int(f["filesize_approx"])
+                ?? duration.flatMap { d in rate > 0 ? Int64(rate * 1000 / 8 * d) : nil }
+            streamed = (f["protocol"] as? String ?? "").contains("m3u8")
+            compressed = (f["format_id"] as? String ?? "").hasSuffix("-drc") || note.contains("drc")
+        }
+
+        /// The download component's own codec order when nothing else decides: AV1, VP9, H.264.
+        var codecRank: Int {
+            let c = vcodec ?? ""
+            return c.hasPrefix("av01") ? 3 : c.hasPrefix("vp09") || c.hasPrefix("vp9") ? 2 : c.hasPrefix("avc1") ? 1 : 0
+        }
+    }
+
+    /// Roughly what the download component picks: each preference narrows the pool when it can,
+    /// then the highest-ranked format wins.
+    static func pick(_ formats: [Format], prefer: [(Format) -> Bool], rank: (Format) -> Double = { $0.tbr }) -> Format? {
+        var pool = formats.filter { $0.bytes != nil }
+        for p in [{ !$0.compressed }, { !$0.streamed }] + prefer {
+            let narrowed = pool.filter(p)
+            if !narrowed.isEmpty { pool = narrowed }
+        }
+        return pool.max { rank($0) < rank($1) }
+    }
+
+    static func qualities(_ formats: [Format]) -> [QualityOption] {
+        let video = formats.filter { $0.hasVideo && ($0.res ?? 0) > 0 }
+        let heights = Set(video.compactMap(\.res)).sorted(by: >)
+        let audio = formats.filter { !$0.hasVideo && $0.hasAudio }
+        let m4a = pick(audio, prefer: [{ $0.ext == "m4a" }])
+        let opus = pick(audio, prefer: [{ $0.acodec?.hasPrefix("opus") == true }])
+        return heights.map { h in
+            let here = video.filter { $0.res == h }
+            var bytes: [VideoContainer: Int64] = [:]
+            for c in VideoContainer.allCases {
+                let separate: (Format) -> Bool = { !$0.hasAudio }
+                let v: Format?
+                switch c {
+                case .mp4: v = pick(here, prefer: [separate, { $0.ext == "mp4" }, { $0.vcodec?.hasPrefix("avc1") == true }])
+                case .mkv: v = pick(here, prefer: [separate], rank: { Double($0.codecRank) * 1e6 + $0.tbr })
+                case .webm: v = pick(here, prefer: [separate, { $0.ext == "webm" }])
+                }
+                guard let v, let vb = v.bytes else { continue }
+                let a = v.hasAudio ? nil : (c == .mp4 ? m4a : opus ?? m4a)?.bytes
+                bytes[c] = vb + (a ?? 0)
+            }
+            return QualityOption(height: h, highFrameRate: here.contains { ($0.fps ?? 0) >= 48 }, bytes: bytes)
+        }
+    }
+
+    static func audioBytes(_ formats: [Format], duration: Double?) -> [AudioFormat: Int64] {
+        let audio = formats.filter { !$0.hasVideo && $0.hasAudio }
+        var out: [AudioFormat: Int64] = [:]
+        out[.m4a] = pick(audio, prefer: [{ $0.ext == "m4a" }])?.bytes
+        if let opus = pick(audio, prefer: [{ $0.acodec?.hasPrefix("opus") == true }]), opus.acodec?.hasPrefix("opus") == true { out[.opus] = opus.bytes }
+        return out
+    }
+
+    /// What an MP3 of this video would weigh at a quality.
+    public func mp3Bytes(_ q: AudioQuality) -> Int64? {
+        duration.map { Int64($0 * Double(q.kbps) * 1000 / 8) }
+    }
+
+    fileprivate static func int(_ v: Any?) -> Int64? {
+        guard let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        return n.int64Value
+    }
+
+    fileprivate static func double(_ v: Any?) -> Double? {
+        guard let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite else { return nil }
+        return n.doubleValue
     }
 }
 
@@ -268,7 +819,7 @@ public enum DownloadEvent: Equatable {
     case begin(DownloadItem)
     case progress(DownloadProgress)
     case step(String, finished: Bool)   // post-processor ("Merger", "ExtractAudio"…)
-    case file(String)                   // final path, after yt-dlp moved it into place
+    case file(String)                   // final path, once moved into place
     case parts([String])                // unmerged streams (no ffmpeg)
     case error(String)
     case warning(String)
@@ -396,6 +947,14 @@ public enum DownloadText {
         return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
     }
 
+    /// An estimate: "~725 KB", "~1.7 GB", "~412 MB".
+    public static func approximateSize(_ bytes: Int64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var v = Double(max(0, bytes)), i = 0
+        while v >= 1024 && i < units.count - 1 { v /= 1024; i += 1 }
+        return "~" + (v < 10 && i > 0 ? String(format: "%.1f", v) : String(format: "%.0f", v)) + " " + units[i]
+    }
+
     /// "42% · 3.1 MB/s · 0:12 left"; "12.3 MB · 3.1 MB/s" while the size is unknown.
     public static func progress(_ m: DownloadMeter) -> String {
         var parts: [String] = []
@@ -508,22 +1067,24 @@ public enum DownloadLeftovers {
 // MARK: - Errors
 
 public enum DownloadErrorText {
-    /// A short, readable reason from yt-dlp's output (its last ERROR line), without CLI advice.
+    /// A short, readable reason from the component's output (its last ERROR line), without
+    /// command-line advice and without naming the component.
     public static func friendly(_ lines: [String], exitCode: Int32) -> String {
         guard var m = lines.last(where: { $0.hasPrefix("ERROR: ") }).map({ String($0.dropFirst(7)) }) else {
-            if lines.contains(where: { $0.contains("no such option") }) {
-                return L("This yt-dlp is too old for BarTap. Update it.")
-            }
-            return L("yt-dlp stopped (exit code %d).", Int(exitCode))
+            if lines.contains(where: { $0.contains("no such option") }) { return L("The download component is too old. Update it.") }
+            return L("The download stopped (code %d).", Int(exitCode))
         }
         let lower = m.lowercased()
-        if lower.contains("unsupported url") { return L("This site isn't supported by yt-dlp.") }
+        if lower.contains("unsupported url") { return L("This site isn't supported.") }
         if lower.contains("is not a valid url") { return L("That doesn't look like a link to a video.") }
-        if lower.contains("requested format is not available") { return L("No download matches this quality. Try Best.") }
+        if lower.contains("requested format is not available") { return L("This quality isn't available. Try Best.") }
         if lower.contains("ffmpeg") && (lower.contains("not found") || lower.contains("not installed")) {
-            return L("This download needs ffmpeg (brew install ffmpeg).")
+            return L("This needs ffmpeg (brew install ffmpeg).")
         }
-        if lower.contains("http error 403") { return L("The site refused the download (HTTP 403). Updating yt-dlp often fixes this.") }
+        if lower.contains("http error 403") { return L("The site refused the download (HTTP 403). Updating the download component often helps.") }
+        if lower.contains("could not copy") && lower.contains("cookie") || lower.contains("operation not permitted") && lower.contains("cookie") {
+            return L("Couldn't read the browser's sign-in. Allow access when macOS asks, or pick another browser.")
+        }
         if ["nodename nor servname", "failed to resolve", "timed out", "network is unreachable", "no route to host"].contains(where: lower.contains) {
             return L("Couldn't reach the site. Check your connection.")
         }
@@ -532,7 +1093,12 @@ public enum DownloadErrorText {
         for cut in [" (caused by", "; please report", " Use --", " (with --", " See  http", " See http"] {
             if let r = m.range(of: cut) { m = String(m[..<r.lowerBound]) }
         }
-        m = m.trimmingCharacters(in: .whitespaces)
+        // Sentences that name the component are advice for its own command line.
+        let all = m.components(separatedBy: ". ")
+        let kept = all.filter { !$0.lowercased().contains("yt-dlp") }
+        m = kept.joined(separator: ". ").trimmingCharacters(in: .whitespaces)
+        if kept.count < all.count, let last = m.last, !".!?".contains(last) { m += "." }
+        if m.isEmpty { return L("The download stopped (code %d).", Int(exitCode)) }
         return m.count > 300 ? String(m.prefix(299)) + "…" : m
     }
 }

@@ -23,10 +23,14 @@ protocol SettingsHost: AnyObject {
     func pickColor()
     func restartMenuBarHost()
     func reopenSettings()
-    /// Reveals every icon while Settings › Layout captures their images.
+    /// Reveals every icon while Settings › Layout reads the bar and captures its icons.
     func revealForLayout(_ on: Bool)
+    /// Shrinks BarTap's stats items meanwhile, when the bar is too crowded to draw every icon.
+    func setStatsSlim(_ on: Bool)
     /// Hidden icons are hidden right now (Settings › Layout checks which displays fit the rest).
     var barCollapsed: Bool { get }
+    /// What BarTap's own stats item (by Accessibility identifier) shows right now.
+    func statsItemImage(_ identifier: String) -> NSImage?
     func applyLayout(_ request: LayoutApplier.Request, progress: @escaping (Int, Int) -> Void, completion: @escaping (LayoutApplier.Report) -> Void)
     func cancelLayoutApply()
     var menuBarIsDark: Bool { get }
@@ -143,21 +147,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                  get: { [unowned self] in s.alwaysHiddenEnabled }, set: { [unowned self] in s.alwaysHiddenEnabled = $0 })
 
         f.section(L("Appearance"))
-        f.popup(L("Toggle icon"), options: [
-            (ToggleIconStyle.logo.rawValue, L("BarTap")), (ToggleIconStyle.chevron.rawValue, L("Chevron")),
-            (ToggleIconStyle.dot.rawValue, L("Dot")), (ToggleIconStyle.ellipsis.rawValue, L("Ellipsis")),
-            (ToggleIconStyle.line.rawValue, L("Lines")), (ToggleIconStyle.grid.rawValue, L("Grid")),
-        ], get: { [unowned self] in s.iconStyle.rawValue }, set: { [unowned self] in s.iconStyle = ToggleIconStyle(rawValue: $0) ?? .chevron })
+        toggleStylePopup(f)
         f.toggle(L("Show section dividers while icons are revealed"), get: { [unowned self] in s.showDivider }, set: { [unowned self] in s.showDivider = $0 })
     }
 
     private func buildReveal(_ f: Form) {
-        f.section(L("Click"))
-        f.note(L("Click the toggle to show or hide icons. ⌥-click also shows the Always Hidden section. Right-click for the menu."))
+        f.section(L("BarTap button"))
+        f.toggle(L("Show hidden icons when the pointer rests on it"),
+                 help: L("Shown this way, they hide again when the pointer leaves them. Clicked open, they stay until you click elsewhere. ⌥-click also shows the Always Hidden section; right-click for the menu."),
+                 get: { [unowned self] in s.toggleHoverOpen }, set: { [unowned self] in s.toggleHoverOpen = $0 })
+        f.slider(L("Hover delay"), min: 0.2, max: 1.5, step: 0.1,
+                 help: L("How long the pointer rests on the BarTap button, a stats item or empty menu bar space before it opens. Passing over doesn't count."),
+                 format: { L("%.1f s", $0) },
+                 get: { [unowned self] in s.hoverDelay }, set: { [unowned self] in s.hoverDelay = $0 })
         f.section(L("Gestures"))
         f.toggle(L("Show when hovering over empty menu bar space"), get: { [unowned self] in s.hoverReveal }, set: { [unowned self] in s.hoverReveal = $0 })
-        f.slider(L("Hover delay"), min: 0, max: 1.5, step: 0.05, format: { String(format: L("%.2f s"), $0) },
-                 get: { [unowned self] in s.hoverDelay }, set: { [unowned self] in s.hoverDelay = $0 })
         f.toggle(L("Show or hide by scrolling in the menu bar"), get: { [unowned self] in s.scrollReveal }, set: { [unowned self] in s.scrollReveal = $0 })
         f.toggle(L("Show when clicking empty menu bar space"), get: { [unowned self] in s.emptyClickReveal }, set: { [unowned self] in s.emptyClickReveal = $0 })
         f.toggle(L("Show every section while ⌘-dragging icons"), get: { [unowned self] in s.revealWhileDragging }, set: { [unowned self] in s.revealWhileDragging = $0 })
@@ -182,6 +186,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             (.shelf, L("Open the shelf")),
             (.clean, L("Clean menu bar on/off")),
             (.keepAwake, L("Keep awake on/off")),
+            (.downloadVideo, L("Download Video…")),
         ]
         for (action, title) in rows {
             let rec = ShortcutRecorder(combo: s.hotkey(action))
@@ -271,6 +276,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         model.applyButton = apply
         model.revertButton = revert
         f.custom(nil, model.status)
+        toggleStylePopup(f)
         let allow = f.button(L("Allow Screen Recording…")) { ItemImages.request() }
         model.permissionButton = allow
         f.toggle(L("Enable the Always Hidden section"),
@@ -300,15 +306,48 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                  get: { [unowned self] in s.cleanShowsExitButton }, set: { [unowned self] in s.cleanShowsExitButton = $0 })
     }
 
+    /// The expand/collapse button's look, each style shown with its icon (General and Layout).
+    private func toggleStylePopup(_ f: Form) {
+        let names: [ToggleIconStyle: String] = [.logo: L("BarTap logo"), .chevron: L("Arrow"), .dot: L("Dot"),
+                                                .ellipsis: L("Ellipsis"), .line: L("Lines"), .grid: L("Grid")]
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for style in ToggleIconStyle.allCases {
+            popup.addItem(withTitle: names[style] ?? style.rawValue)
+            popup.lastItem?.image = Icons.toggle(style: style, expanded: false, badge: nil)
+            popup.lastItem?.representedObject = style.rawValue
+        }
+        let sync: () -> Void = { [weak popup, unowned self] in popup?.selectItem(at: ToggleIconStyle.allCases.firstIndex(of: s.iconStyle) ?? 0) }
+        sync()
+        let t = ClosureTarget { [unowned self] sender in
+            guard let raw = (sender as? NSPopUpButton)?.selectedItem?.representedObject as? String else { return }
+            s.iconStyle = ToggleIconStyle(rawValue: raw) ?? .logo
+        }
+        f.keep(t)
+        popup.target = t
+        popup.action = #selector(ClosureTarget.fire(_:))
+        f.onAppear(sync)
+        f.custom(L("Expand/collapse button"), popup)
+    }
+
+    private func selectPane(titled title: String) {
+        guard let tabs = window?.contentViewController as? NSTabViewController,
+              let i = tabs.tabViewItems.firstIndex(where: { $0.label == title }) else { return }
+        tabs.selectedTabViewItemIndex = i
+    }
+
     private func buildStats(_ f: Form) {
         f.section(L("Menu bar stats"))
-        f.note(L("Lightweight system monitor: one process, no background daemon, no root helper. Details and process lists are sampled only while a dropdown is open."))
-        f.note(L("Pick a layout for each item, or Customize… to combine elements like iStat Menus. Top to bottom is left to right in the menu bar."))
+        f.note(L("Lightweight system monitor: one process, no background daemon, no root helper. Details and process lists are sampled only while an item's details are open."))
+        f.note(L("Pick a layout for each item, or Customize… to combine elements like iStat Menus. New items appear right of the BarTap button; arrange them, or hide some, in Layout."))
+        f.button(L("Arrange in Layout…")) { [weak self] in self?.selectPane(titled: L("Layout")) }
         let modules = StatsModulesView(settings: s, liveSnapshot: { [weak self] in self?.host?.statsSnapshot() },
                                        openEditor: { [weak self] m in self?.openElementEditor(m) })
         f.custom(nil, modules)
-        f.toggle(L("Combine into a single menu bar item"), help: L("Saves space beside the notch; each metric gets its own submenu."),
+        f.toggle(L("Combine into a single menu bar item"), help: L("Saves space beside the notch; its details show each metric in a tab."),
                  get: { [unowned self] in s.statsCombined }, set: { [unowned self] in s.statsCombined = $0 })
+        f.toggle(L("Open details on hover"),
+                 help: L("Rest the pointer on an item to see its details; they close when the pointer leaves them. A click keeps them open until you click elsewhere."),
+                 get: { [unowned self] in s.statsHoverOpen }, set: { [unowned self] on in s.statsHoverOpen = on })
 
         f.section(L("AI usage"))
         let detected = AISources.detected()
@@ -341,7 +380,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                  get: { [unowned self] in s.statsInterval }, set: { [unowned self] in s.statsInterval = $0 })
         f.toggle(L("Show temperatures in °F"), get: { [unowned self] in s.statsFahrenheit }, set: { [unowned self] in s.statsFahrenheit = $0 })
         f.toggle(L("Show network speed in bits"), get: { [unowned self] in s.statsNetworkBits }, set: { [unowned self] in s.statsNetworkBits = $0 })
-        f.toggle(L("Show public IP address"), help: L("Asks api.ipify.org for your public address when you open the Network dropdown (at most every 10 minutes)."),
+        f.toggle(L("Show public IP address"), help: L("Asks api.ipify.org for your public address when you open the Network details (at most every 10 minutes)."),
                  get: { [unowned self] in s.statsShowPublicIP }, set: { [unowned self] in s.statsShowPublicIP = $0 })
 
         f.section(L("Time"))

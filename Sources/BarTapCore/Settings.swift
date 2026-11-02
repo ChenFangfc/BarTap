@@ -29,7 +29,7 @@ public enum SpacingPreset: String, CaseIterable {
 }
 
 public enum HotkeyAction: String, CaseIterable {
-    case toggle, toggleAll, search, shelf, clean, keepAwake
+    case toggle, toggleAll, search, shelf, clean, keepAwake, downloadVideo
 }
 
 /// Typed facade over UserDefaults. Tests pass an isolated suite.
@@ -53,7 +53,8 @@ public final class Settings {
         "iconStyle": ToggleIconStyle.logo.rawValue,
         "startCollapsed": true,
         "hoverReveal": false,
-        "hoverDelay": 0.3,
+        "hoverDelay": 0.5,
+        "toggleHoverOpen": true,
         "scrollReveal": false,
         "emptyClickReveal": false,
         "revealWhileDragging": true,
@@ -72,8 +73,7 @@ public final class Settings {
         "ruleOffline": false,
         "debugCommands": false,
         "videoDownloadsEnabled": true,
-        "videoPreset": VideoPreset.best.rawValue,
-        "videoPlaylists": false,
+        "videoPreset": VideoQuality.best.storage,
         "hotkey.toggle": "11:\(KeyCombo.control | KeyCombo.option | KeyCombo.cmd)",   // ⌃⌥⌘B
         "hotkey.search": "3:\(KeyCombo.control | KeyCombo.option | KeyCombo.cmd)",    // ⌃⌥⌘F
     ]
@@ -105,9 +105,11 @@ public final class Settings {
 
     // MARK: Reveal gestures
     public var hoverReveal: Bool { get { bool("hoverReveal") } set { setBool("hoverReveal", newValue) } }
+    /// Rest the pointer on the BarTap button to show hidden icons (until it leaves them).
+    public var toggleHoverOpen: Bool { get { bool("toggleHoverOpen") } set { setBool("toggleHoverOpen", newValue) } }
     public var hoverDelay: Double {
-        get { min(max(double("hoverDelay"), 0), 2) }
-        set { setDouble("hoverDelay", min(max(newValue, 0), 2)) }
+        get { min(max(double("hoverDelay"), 0.2), 1.5) }
+        set { setDouble("hoverDelay", min(max(newValue, 0.2), 1.5)) }
     }
     public var scrollReveal: Bool { get { bool("scrollReveal") } set { setBool("scrollReveal", newValue) } }
     public var emptyClickReveal: Bool { get { bool("emptyClickReveal") } set { setBool("emptyClickReveal", newValue) } }
@@ -138,12 +140,26 @@ public final class Settings {
     public var videoDownloadsEnabled: Bool { get { bool("videoDownloadsEnabled") } set { setBool("videoDownloadsEnabled", newValue) } }
     /// Empty: ~/Downloads.
     public var videoFolder: String { get { string("videoFolder") } set { setString("videoFolder", newValue) } }
-    public var videoPreset: VideoPreset {
-        get { VideoPreset(rawValue: string("videoPreset")) ?? .best }
-        set { setString("videoPreset", newValue.rawValue) }
+    /// The quality a download starts with (the panel then offers what the video has).
+    public var videoQuality: VideoQuality {
+        get { VideoQuality(storage: string("videoPreset")) ?? .best }
+        set { setString("videoPreset", newValue.storage) }
     }
-    public var videoPlaylists: Bool { get { bool("videoPlaylists") } set { setBool("videoPlaylists", newValue) } }
-    /// A yt-dlp the user picked; empty: find one automatically.
+    /// Container, subtitles, embedding, sign-in and the other choices that carry over.
+    public var videoOptions: VideoOptions {
+        get { defaults.data(forKey: "videoOptions").flatMap { try? JSONDecoder().decode(VideoOptions.self, from: $0) } ?? VideoOptions() }
+        set {
+            guard newValue != videoOptions, let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: "videoOptions")
+            changed("videoOptions")
+        }
+    }
+    /// Folders recently saved to, most recent first.
+    public var videoRecentFolders: [String] {
+        get { defaults.stringArray(forKey: "videoRecentFolders") ?? [] }
+        set { defaults.set(newValue, forKey: "videoRecentFolders") }
+    }
+    /// A download component (yt-dlp) the user picked; empty: find one automatically.
     public var videoToolPath: String { get { string("videoToolPath") } set { setString("videoToolPath", newValue) } }
 
     // MARK: Placement bookkeeping

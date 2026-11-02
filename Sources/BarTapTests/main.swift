@@ -335,8 +335,11 @@ test("settings: defaults, clamping, cleared hotkeys stay cleared") {
     expect(s.hotkey(.toggle)?.display() == "⌃⌥⌘B")
     s.rehideDelay = 0
     expect(s.rehideDelay == 1)
+    expect(s.hoverDelay == 0.5 && s.toggleHoverOpen, "one hover delay, 0.5 s; the button opens on hover")
     s.hoverDelay = 99
-    expect(s.hoverDelay == 2)
+    expect(s.hoverDelay == 1.5)
+    s.hoverDelay = 0
+    expect(s.hoverDelay == 0.2 && s.statsHoverDelay == 0.2, "shared with the stats details")
     s.setHotkey(.toggle, nil)
     expect(s.hotkey(.toggle) == nil, "cleared hotkey must not fall back to the factory default")
     expect(s.provisionalToggleKey == nil)
@@ -661,25 +664,39 @@ test("ai: Claude Code's cached plan usage") {
     expect(ClaudePlanCache.status(fromClaudeJSON: pretty)?.windows.first?.usedPercent == 12, "pretty-printed, as Claude Code writes it")
 }
 
-test("layout plan: from the right, each icon next to its wanted neighbour") {
+test("layout plan: icons already in order stay, every other one moves once") {
     let anchors: Set<String> = ["‖", "│", "CC", "Clock"]
+    func applied(_ current: [String], _ steps: [LayoutPlan.Step]) -> [String] {
+        var order = current
+        for step in steps {
+            order.removeAll { $0 == step.item }
+            order.insert(step.item, at: order.firstIndex(of: step.leftOf)!)
+        }
+        return order
+    }
     // Already in order: nothing to do.
     expect(LayoutPlan.nextStep(current: ["A", "‖", "B", "│", "C", "CC", "Clock"], wanted: ["A", "‖", "B", "│", "C", "CC", "Clock"], anchors: anchors) == nil)
-    // Hide C (shown → hidden) and swap A and B.
+    // Hide C (shown → hidden) and swap A and B: two moves.
     let current = ["A", "B", "‖", "│", "C", "D", "CC", "Clock"]
     let wanted = ["B", "A", "‖", "C", "│", "D", "CC", "Clock"]
     let steps = LayoutPlan.steps(current: current, wanted: wanted, anchors: anchors)
-    expect(steps == [LayoutPlan.Step(item: "C", leftOf: "│"), LayoutPlan.Step(item: "A", leftOf: "‖")], "\(steps)")
+    expect(steps.count == 2 && applied(current, steps) == wanted, "\(steps)")
+    // One icon from the far right to the hidden section: one move, nothing else shuffled.
+    let row = ["H1", "H2", "│", "S1", "S2", "S3", "S4", "AI", "T", "CC", "Clock"]
+    let hide = ["H1", "H2", "AI", "│", "S1", "S2", "S3", "S4", "T", "CC", "Clock"]
+    let one = LayoutPlan.steps(current: row, wanted: hide, anchors: anchors)
+    expect(one == [LayoutPlan.Step(item: "AI", leftOf: "│")], "\(one)")
     // Anchors never move, even when out of place.
     expect(LayoutPlan.steps(current: ["│", "A"], wanted: ["A", "│"], anchors: anchors) == [LayoutPlan.Step(item: "A", leftOf: "│")])
     // Icons the plan doesn't know (just appeared) stay; ones that vanished are skipped.
-    expect(LayoutPlan.steps(current: ["X", "A", "B", "CC"], wanted: ["B", "A", "Gone", "CC"], anchors: anchors)
-           == [LayoutPlan.Step(item: "A", leftOf: "CC")])
+    let unknown = LayoutPlan.steps(current: ["X", "A", "B", "CC"], wanted: ["B", "A", "Gone", "CC"], anchors: anchors)
+    expect(unknown.count == 1 && applied(["X", "A", "B", "CC"], unknown).filter { $0 != "X" } == ["B", "A", "CC"], "\(unknown)")
     // An unknown icon between two that are in order doesn't cost a move.
     expect(LayoutPlan.nextStep(current: ["A", "X", "B", "CC"], wanted: ["A", "B", "CC"], anchors: anchors) == nil)
-    // Reverse a row of five: four drags at most.
+    // Reverse a row of five: four moves.
     let five = ["A", "B", "C", "D", "E", "CC"]
-    expect(LayoutPlan.steps(current: five, wanted: ["E", "D", "C", "B", "A", "CC"], anchors: anchors).count == 4)
+    let reversed = LayoutPlan.steps(current: five, wanted: ["E", "D", "C", "B", "A", "CC"], anchors: anchors)
+    expect(reversed.count == 4 && applied(five, reversed) == ["E", "D", "C", "B", "A", "CC"], "\(reversed)")
 }
 
 test("layout rows: drag between rows, reorder, nearest end, merge") {
@@ -716,7 +733,25 @@ test("layout rows: drag between rows, reorder, nearest end, merge") {
     expect(m.shown == ["B", "A", "N"] && m.hidden == [] && m.pinned == ["CC"], "\(m)")
     // The plan for those edits, with BarTap's dividers and pinned icons as anchors.
     let steps = LayoutPlan.steps(current: live.order(alwaysSection: false), wanted: m.order(alwaysSection: false), anchors: ["│", "CC"])
-    expect(steps == [LayoutPlan.Step(item: "N", leftOf: "CC"), LayoutPlan.Step(item: "A", leftOf: "N")], "\(steps)")
+    expect(steps.count == 1, "\(steps)")
+}
+
+test("layout rows: Apply moves only the icons the user moved") {
+    // The rows were read earlier; since then (or because a reading was stale) H1 and H2 swapped.
+    let edited = LayoutArrangement(shown: ["S1"], hidden: ["H1", "H2", "H3", "S2"], always: [], pinned: ["CC"])
+    let now = LayoutArrangement(shown: ["S1", "S2"], hidden: ["H2", "H1", "H3"], always: [], pinned: ["CC"])
+    let goal = edited.rebased(onto: now, touched: ["S2"])
+    expect(goal.hidden == ["H2", "H1", "H3", "S2"] && goal.shown == ["S1"], "\(goal)")
+    // Dropped before an icon: lands before it, wherever that icon is now.
+    let before = LayoutArrangement(shown: [], hidden: ["H1", "X", "H2"], always: [], pinned: [])
+    let reality = LayoutArrangement(shown: ["X"], hidden: ["H2", "H1"], always: [], pinned: [])
+    expect(before.rebased(onto: reality, touched: ["X"]).hidden == ["X", "H2", "H1"])
+    // Two moved icons keep their order; an icon that went away is skipped.
+    let two = LayoutArrangement(shown: ["A", "B", "S"], hidden: [], always: [], pinned: [])
+    let bar = LayoutArrangement(shown: ["S"], hidden: ["A", "B"], always: [], pinned: [])
+    expect(two.rebased(onto: bar, touched: ["A", "B", "Gone"]).shown == ["A", "B", "S"])
+    // Nothing touched: the bar as it is.
+    expect(edited.rebased(onto: now, touched: []) == now)
 }
 
 test("short rows: a display too narrow for every shown icon is named, others not") {
@@ -763,8 +798,22 @@ test("own run: BarTap's items found by width in the window list") {
     let collapsed = row(widths, wideAt: 9)
     let c = run.locate(screens: [screen], windows: collapsed)
     expect(c?.toggle == collapsed[8].bounds && c?.hidden.width == 5016, "\(String(describing: c))")
-    // Different stats widths (another app with similar icons) don't match.
-    expect(OwnRun(hidden: 18, toggle: 31, stats: [47, 61], always: nil).locate(screens: [screen], windows: open) == nil)
+    // Stats items moved elsewhere: │ right before the toggle is enough.
+    expect(OwnRun(hidden: 18, toggle: 31, stats: [47, 61], always: nil).locate(screens: [screen], windows: open)?.toggle == open[8].bounds)
+    // A look-alike (an 18 pt icon, then a 31 pt one) further left: the one the stats items follow wins,
+    // and without them the one nearest where BarTap last saw its toggle.
+    let twin = row([132, 42, 76, 218, 63, 67, 60, 47, 31, 18, 38, 31, 18, 38])
+    expect(run.locate(screens: [screen], windows: twin)?.toggle == twin[8].bounds)
+    let rd = { (w: WindowInfo) in MenuBarGeometry.rightDistance(of: w.bounds, on: screen) }
+    expect(OwnRun(hidden: 18, toggle: 31, stats: [], always: nil, toggleRD: rd(twin[11]) + 3).locate(screens: [screen], windows: twin)?.toggle == twin[11].bounds)
+    expect(OwnRun(hidden: 18, toggle: 31, stats: [], always: nil, toggleRD: rd(twin[8]) - 2).locate(screens: [screen], windows: twin)?.toggle == twin[8].bounds)
+    // Named windows (Screen Recording granted) are exact, wherever the stats items are.
+    var named = open
+    named[8].name = "tb_toggle"
+    named[9].name = "tb_hidden"
+    named[12].name = "tb_always"
+    let n = OwnRun(hidden: 99, toggle: 99, stats: [], always: 99).locate(screens: [screen], windows: named)
+    expect(n?.toggle == open[8].bounds && n?.hidden == open[9].bounds && n?.always == open[12].bounds, "\(String(describing: n))")
     // No visible bar: nothing found.
     let asleep = open.map { w -> WindowInfo in var w = w; w.isOnScreen = false; return w }
     expect(run.locate(screens: [screen], windows: asleep) == nil)
@@ -888,6 +937,7 @@ test("stats: clock formats") {
 
 runTrioTests()
 runVideoDownloadTests()
+runPresenterTests()
 
 print("\n\(checks) checks, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

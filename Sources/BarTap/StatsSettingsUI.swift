@@ -100,7 +100,8 @@ enum StatsNames {
 }
 
 /// Settings › Stats module list: enable a module, pick a layout, see it, and order the items.
-/// Top to bottom here is left to right in the menu bar.
+/// Top to bottom here is left to right inside the combined item; separate items are arranged in
+/// Settings › Layout.
 final class StatsModulesView: NSStackView {
     private let settings: Settings
     private let liveSnapshot: () -> StatsSnapshot?
@@ -218,8 +219,11 @@ final class StatsModulesView: NSStackView {
             b.isEnabled = on && index.map { $0 + delta >= 0 && $0 + delta < count } == true
             return b
         }
-        let left = move(-1, symbol: "chevron.up", tip: L("Move left in the menu bar"))
-        let right = move(1, symbol: "chevron.down", tip: L("Move right in the menu bar"))
+        // The order inside the combined item; separate items are arranged in Settings › Layout.
+        let left = move(-1, symbol: "chevron.up", tip: L("Move left in the combined item"))
+        let right = move(1, symbol: "chevron.down", tip: L("Move right in the combined item"))
+        left.isHidden = !s.statsCombined
+        right.isHidden = !s.statsCombined
 
         let preview = NSImageView(image: StatsRenderer.image(m, current, Self.snapshot(for: m, settings: s, live: live), Self.options(s)))
         preview.contentTintColor = on ? .labelColor : .tertiaryLabelColor

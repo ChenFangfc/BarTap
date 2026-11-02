@@ -3,8 +3,9 @@ import Network
 import UserNotifications
 import BarTapCore
 
-/// Owns the stats status items, their dropdowns and alerts. With no stats enabled it owns
-/// nothing and the engine is stopped.
+/// Owns the stats status items, their details and alerts. With no stats enabled it owns nothing
+/// and the engine is stopped. Details open in a panel below the item, on hover (resting on it) or
+/// on click (HoverClickPresenter); a right-click shows a small menu.
 final class StatsController: NSObject, NSMenuDelegate {
     private let settings: Settings
     private let engine = StatsEngine()
@@ -25,7 +26,6 @@ final class StatsController: NSObject, NSMenuDelegate {
         return settings.statsCombined ? (combinedItem == nil && !wanted.isEmpty) : wanted.contains { items[$0] == nil }
     }
     private var openPanels: [StatsModule: StatsPanel] = [:]
-    private var openMenus = 0
     private var last: StatsSnapshot?
     private var aiEngine: AIUsageEngine?
     let aiPrices = AIPrices()
@@ -76,6 +76,26 @@ final class StatsController: NSObject, NSMenuDelegate {
     /// Bluetooth item: paired devices and batteries, only while it is on.
     private var bluetooth: BluetoothMonitor?
     private var scrollMonitor: Any?
+    /// Hover and click on the items open their details (one at a time).
+    private let presenter = HoverClickPresenter()
+    private let locator = StatusItemLocator()
+    private var detailWindow: DetailWindow?
+    /// What the open details belong to: a module, or "combined"; and the module shown.
+    private var detailTarget: String?
+    private var detailModule: StatsModule?
+    /// The item's frame the details hang from (global Cocoa), for the hover gap test.
+    private var detailItemFrame: NSRect?
+    private var combinedTab: StatsModule?
+
+    /// The image a stats item shows right now, by its Accessibility identifier ("bartap.stats.cpu").
+    func itemImage(_ identifier: String) -> NSImage? {
+        let name = identifier.dropFirst("bartap.stats.".count)
+        if name == "combined" { return combinedItem?.button?.image }
+        return StatsModule(rawValue: String(name)).flatMap { items[$0]?.button?.image }
+    }
+
+    /// The stats items by module name (debug).
+    func debugItems() -> [(String, NSStatusItem)] { items.map { ($0.key.rawValue, $0.value) } }
 
     /// Persist data-usage counters and AI usage sums (on quit).
     func flush() {
@@ -158,7 +178,7 @@ final class StatsController: NSObject, NSMenuDelegate {
             for (_, item) in items { NSStatusBar.system.removeStatusItem(item) }
             items.removeAll()
             if combinedItem == nil {
-                combinedItem = makeItem(name: "tb_stats_combined", left: anchor, right: nil)
+                combinedItem = makeItem(name: "tb_stats_combined", left: anchor, right: nil, module: nil)
             }
         } else {
             if let c = combinedItem { NSStatusBar.system.removeStatusItem(c); combinedItem = nil }
@@ -166,22 +186,13 @@ final class StatsController: NSObject, NSMenuDelegate {
                 NSStatusBar.system.removeStatusItem(item)
                 items[m] = nil
             }
-            // The stored keys must run strictly downwards from the toggle's in the configured
-            // order (larger = further left). If they don't (the user reordered, or a key is gone),
-            // start over: remove everything first, since removing an item deletes its key.
-            let existing = wanted.filter { items[$0] != nil }
-            if let anchor, !existing.isEmpty {
-                let keys = existing.map { storedKey("tb_stats_\($0.rawValue)") }
-                let chain = [anchor] + keys.compactMap { $0 }
-                if keys.contains(where: { $0 == nil }) || !zip(chain, chain.dropFirst()).allSatisfy({ $0 > $1 }) {
-                    removeItemsForReplacement()
-                }
-            }
-            // New items get a key between their neighbours', so the order holds.
-            for (i, m) in wanted.enumerated() where items[m] == nil {
-                let left = i == 0 ? anchor : storedKey("tb_stats_\(wanted[i - 1].rawValue)") ?? anchor
-                let right = wanted[(i + 1)...].lazy.compactMap { [self] n in items[n] != nil ? storedKey("tb_stats_\(n.rawValue)") : nil }.first
-                items[m] = makeItem(name: "tb_stats_\(m.rawValue)", left: left, right: right)
+            // Items that exist stay wherever they are: the user arranges them (and hides some) in
+            // Settings › Layout. New ones go right of the toggle, in the configured order.
+            var left = anchor
+            for m in wanted where items[m] == nil {
+                let item = makeItem(name: "tb_stats_\(m.rawValue)", left: left, right: nil, module: m)
+                items[m] = item
+                left = storedKey("tb_stats_\(m.rawValue)") ?? left
             }
         }
         var needed = Set(wanted)
@@ -247,7 +258,7 @@ final class StatsController: NSObject, NSMenuDelegate {
     /// previous stats item) and `right` (the next one, if any). The proxy frames are not trusted
     /// for this: right after launch they can be stale or even swapped.
     /// Note: removing a status item also deletes its stored key; set keys after removing.
-    private func makeItem(name: String, left: Double?, right: Double?) -> NSStatusItem {
+    private func makeItem(name: String, left: Double?, right: Double?, module: StatsModule?) -> NSStatusItem {
         let key = "NSStatusItem Preferred Position \(name)"
         if UserDefaults.standard.object(forKey: key) == nil, let left {
             let value = right.map { (left + $0) / 2 } ?? (left - min(0.05, left / 4))
@@ -257,6 +268,9 @@ final class StatsController: NSObject, NSMenuDelegate {
         itemsCreatedAt = Date()
         item.autosaveName = name
         item.behavior = []
+        // Named for Accessibility, so Settings › Layout lists it like any other icon.
+        item.button?.setAccessibilityIdentifier("bartap.stats." + (module?.rawValue ?? "combined"))
+        item.button?.setAccessibilityLabel(module.map(StatsNames.module) ?? L("Stats"))
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
@@ -291,11 +305,40 @@ final class StatsController: NSObject, NSMenuDelegate {
     private(set) var skippedUpdates = 0
     private(set) var performedUpdates = 0
 
+    /// While Settings › Layout's Apply moves icons, the stats items shrink to a sliver: on a narrow
+    /// (notched) bar that makes room for every icon, so each one can be reached.
+    var slim = false {
+        didSet {
+            guard slim != oldValue else { return }
+            invalidateDrawn()
+            render()
+        }
+    }
+    static let slimWidth: CGFloat = 4
+
+    /// Items in a hidden section while it is hidden (see AppDelegate.updateDormantStats): not
+    /// redrawn until they can be seen again, then brought up to date at once.
+    var dormant: Set<StatsModule> = [] {
+        didSet {
+            guard dormant != oldValue else { return }
+            for m in oldValue.subtracting(dormant) { drawn[m.rawValue] = nil }
+            render()
+        }
+    }
+
     private func render() {
+        syncPresenter()
+        if slim {
+            for item in Array(items.values) + [combinedItem].compactMap({ $0 }) {
+                if abs(item.length - Self.slimWidth) > 0.5 { item.length = Self.slimWidth }
+                if item.button?.image != nil { item.button?.image = nil }
+            }
+            return
+        }
         let o = options
         let now = Date()
         let optionKey = "\(o.fahrenheit)|\(o.bits)"
-        for (m, item) in items {
+        for (m, item) in items where !dormant.contains(m) {
             let elements = settings.statsElements(m)
             let width = StatsRenderer.width(m, elements, o)
             if abs(item.length - width) > 0.5 { item.length = width }
@@ -412,8 +455,6 @@ final class StatsController: NSObject, NSMenuDelegate {
         return windows.contains { $0.frame.contains(p) }
     }
 
-    @objc private func toggleMute() { audio?.toggleMute() }
-
     private static func openSettingsPane(_ id: String) {
         if let url = URL(string: "x-apple.systempreferences:" + id) { NSWorkspace.shared.open(url) }
     }
@@ -434,8 +475,8 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
         guard !on, [.mouse, .keyboard, .trackpad, .gamepad].contains(d.kind) else { perform(); return }
         // Disconnecting an input device can leave the Mac without a keyboard or pointer: ask
-        // first, outside the menu.
-        openPanels[.bluetooth]?.enclosingMenuItem?.menu?.cancelTracking()
+        // first, with the details closed.
+        presenter.dismiss()
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
@@ -447,44 +488,199 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
     }
 
-    // MARK: Menus
+    // MARK: Details (hover / click)
 
-    private func module(for menu: NSMenu) -> StatsModule? {
-        items.first { $0.value.menu === menu }?.key
+    /// Items take clicks themselves (no menu; makeItem's is dropped), and the presenter follows
+    /// the settings. Runs with every render; does nothing when nothing changed.
+    private func syncPresenter() {
+        if !presenterReady { configurePresenter() }
+        let all = items.map { ($0.key.rawValue, $0.value) } + (combinedItem.map { [("combined", $0)] } ?? [])
+        for (_, item) in all where item.menu != nil || item.button?.action != #selector(itemButton(_:)) {
+            item.menu = nil
+            item.button?.target = self
+            item.button?.action = #selector(itemButton(_:))
+            item.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
+        }
+        var config = presenter.config
+        config.hoverEnabled = settings.statsHoverOpen
+        config.dwell = settings.statsHoverDelay
+        if config != presenter.config { presenter.config = config }
+        presenter.hoverActive = settings.statsHoverOpen && !all.isEmpty
+        // Details whose item went away (or that became the combined item) close.
+        if let t = detailTarget, !all.contains(where: { $0.0 == t }) { presenter.dismiss() }
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        if combinedItem?.menu === menu {
-            for m in settings.statsModules {
-                let entry = NSMenuItem(title: title(for: m), action: nil, keyEquivalent: "")
-                let sub = NSMenu()
-                sub.delegate = self
-                sub.autoenablesItems = false
-                entry.submenu = sub
-                entry.representedObject = m.rawValue
-                menu.addItem(entry)
-            }
-            appendFooter(to: menu)
-            return
+    private var presenterReady = false
+
+    private func configurePresenter() {
+        presenterReady = true
+        // Another Space or a display change: the details' item isn't where they hang from any more.
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) {
+            [weak self] _ in self?.presenter.dismiss()
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) {
+            [weak self] _ in self?.presenter.dismiss()
+        })
+        locator.items = { [weak self] in self?.hitItems() ?? [] }
+        presenter.inBar = { [weak self] p in self?.locator.inMenuBar(p) ?? false }
+        presenter.locate = { [weak self] p in self?.locator.hit(at: p) }
+        presenter.contains = { [weak self] p in self?.detailsContain(p) ?? false }
+        presenter.open = { [weak self] id, mode, frame in self?.openDetails(id, frame: frame, pinned: mode == .pinned) }
+        // Pinned by a click: the details take the keyboard like a menu (Esc closes them).
+        presenter.pin = { [weak self] in self?.detailWindow?.makeKey() }
+        presenter.close = { [weak self] in self?.closeDetails() }
+    }
+
+    /// Our items for the hit test: window names and in-process frames (global CG).
+    private func hitItems() -> [StatusItemHitTest.Item] {
+        let all = items.map { ($0.key.rawValue, $0.value) } + (combinedItem.map { [("combined", $0)] } ?? [])
+        return all.map { id, item in
+            StatusItemHitTest.Item(id: id, windowName: "tb_stats_\(id)",
+                                   proxyFrame: item.button?.window.map { SystemQueries.cgRect(fromCocoa: $0.frame) })
         }
-        guard let m = module(for: menu) ?? submenuModule(menu) else { return }
+    }
+
+    private func item(for id: String) -> NSStatusItem? {
+        id == "combined" ? combinedItem : StatsModule(rawValue: id).flatMap { items[$0] }
+    }
+
+    @objc private func itemButton(_ sender: NSStatusBarButton) {
+        let all = items.map { ($0.key.rawValue, $0.value) } + (combinedItem.map { [("combined", $0)] } ?? [])
+        guard let id = all.first(where: { $0.1.button === sender })?.0 else { return }
+        let e = NSApp.currentEvent
+        if e?.type == .rightMouseDown || (e?.type == .leftMouseDown && e?.modifierFlags.contains(.control) == true) {
+            presenter.dismiss()
+            showContextMenu()
+        } else {
+            presenter.itemClicked(id)
+        }
+    }
+
+    /// Right-click: a small menu at the pointer (on whichever display was clicked).
+    private func showContextMenu() {
+        let menu = NSMenu()
+        let prefs = NSMenuItem(title: L("Stats Settings…"), action: #selector(openStatsSettings), keyEquivalent: "")
+        prefs.target = self
+        menu.addItem(prefs)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    /// Inside the open details, or the gap between them and their item (crossing it is not leaving).
+    private func detailsContain(_ p: NSPoint) -> Bool {
+        guard let w = detailWindow, w.isVisible else { return false }
+        let f = w.frame
+        if f.insetBy(dx: -2, dy: -2).contains(p) { return true }
+        guard let item = detailItemFrame else { return false }
+        let bridge = NSRect(x: min(item.minX, f.minX), y: f.maxY - 2, width: max(item.maxX, f.maxX) - min(item.minX, f.minX),
+                            height: max(0, item.minY - f.maxY) + 4)
+        return bridge.contains(p)
+    }
+
+    /// Opens an item's details below it: on the display it was hovered or clicked on (`frame`,
+    /// global CG), else below the item where BarTap itself has it.
+    private func openDetails(_ id: String, frame: CGRect?, pinned: Bool) {
+        closeDetails()
+        let modules = settings.statsModules
+        let module: StatsModule
+        if id == "combined" {
+            guard let first = modules.first else { return }
+            module = combinedTab.flatMap { modules.contains($0) ? $0 : nil } ?? first
+        } else {
+            guard let m = StatsModule(rawValue: id) else { return }
+            module = m
+        }
+        detailTarget = id
+        let tabs = id == "combined" ? DetailTabs(modules: modules, selected: module) { [weak self] m in self?.switchTab(m) } : nil
+        let content = DetailContent(panel: startPanel(module), footer: DetailFooter(actions: footerActions(for: module)), tabs: tabs)
+        let window = DetailWindow(content: content)
+        window.onCancel = { [weak self] in self?.presenter.dismiss() }
+        detailWindow = window
+        let itemCocoa: NSRect? = frame.map { f in
+            NSRect(x: f.minX, y: SystemQueries.mainScreenHeight - f.maxY, width: f.width, height: f.height)
+        } ?? item(for: id)?.button?.window?.frame
+        detailItemFrame = itemCocoa
+        let anchor = itemCocoa ?? NSRect(origin: NSEvent.mouseLocation, size: .zero)
+        let screen = NSScreen.screens.first { $0.frame.intersects(anchor) } ?? NSScreen.main
+        window.show(below: anchor, on: screen)
+        if pinned { window.makeKey() }
+        // Like a menu: the item stays highlighted while its details are open (again once the
+        // click that opened them is over, which un-highlights the button).
+        for delay in [0.0, 0.35] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.detailTarget == id else { return }
+                self.item(for: id)?.button?.highlight(true)
+            }
+        }
+    }
+
+    /// Builds a module's panel and starts sampling its details (as a dropdown did).
+    private func startPanel(_ m: StatsModule) -> StatsPanel {
         let panel = makePanel(m)
         if let last { panel.update(last, options) }
         panel.compact()
         openPanels[m] = panel
-        let host = NSMenuItem()
-        host.view = panel
-        menu.addItem(host)
+        detailModule = m
+        if m == .bluetooth { bluetooth?.setDetail(true) } else if m != .volume { engine.setDetail(m, true) }
         if m == .network { fetchPublicIPIfWanted(into: panel as? NetworkPanel) }
-        if menu.supermenu == nil { appendFooter(to: menu, module: m) }
+        return panel
     }
 
-    private func submenuModule(_ menu: NSMenu) -> StatsModule? {
-        guard let parent = menu.supermenu,
-              let entry = parent.items.first(where: { $0.submenu === menu }),
-              let raw = entry.representedObject as? String else { return nil }
-        return StatsModule(rawValue: raw)
+    private func stopPanel(_ m: StatsModule) {
+        if m == .bluetooth { bluetooth?.setDetail(false) } else if m != .volume { engine.setDetail(m, false) }
+        // Drop the panel so closed details cost nothing.
+        openPanels[m] = nil
+    }
+
+    private func switchTab(_ m: StatsModule) {
+        guard let window = detailWindow, m != detailModule else { return }
+        let content = window.chrome.content
+        if let old = detailModule { stopPanel(old) }
+        combinedTab = m
+        content.replace(panel: startPanel(m), footer: DetailFooter(actions: footerActions(for: m)))
+        window.fitContent()
+    }
+
+    private func closeDetails() {
+        guard let window = detailWindow else { return }
+        window.orderOut(nil)
+        detailWindow = nil
+        if let m = detailModule { stopPanel(m) }
+        if let id = detailTarget { item(for: id)?.button?.highlight(false) }
+        detailModule = nil
+        detailTarget = nil
+        detailItemFrame = nil
+    }
+
+    /// The details' bottom row: what the menu's footer offered.
+    private func footerActions(for module: StatsModule) -> [DetailAction] {
+        let volumes = module == .disk ? ejectableVolumes() : []
+        return DetailActions.list(for: module, muted: audio?.state?.muted == true, canMute: audio?.state?.canMute == true,
+                                  volumes: volumes.map(\.name)) { [weak self] command in self?.run(command, volumes: volumes.map(\.url)) }
+    }
+
+    private func run(_ command: DetailCommand, volumes: [URL]) {
+        switch command {
+        case .eject(let i): if i < volumes.count { eject(volumes[i]) }
+        case .diskUtility: openDiskUtility()
+        case .activityMonitor: openActivityMonitor()
+        case .soundSettings: openSoundSettings()
+        case .bluetoothSettings: openBluetoothSettings()
+        case .wifiSettings: openWiFiSettings()
+        case .batterySettings: openBatterySettings()
+        case .statsSettings: openStatsSettingsFromDetails()
+        case .toggleMute:
+            audio?.toggleMute()
+            // The button's title follows the new state.
+            if detailModule == .trio, let window = detailWindow {
+                window.chrome.content.replace(panel: window.chrome.content.panel, footer: DetailFooter(actions: footerActions(for: .trio)))
+                window.fitContent()
+            }
+        }
+    }
+
+    private func openStatsSettingsFromDetails() {
+        presenter.dismiss()
+        openSettings?()
     }
 
     private func title(for m: StatsModule) -> String {
@@ -502,38 +698,6 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .bluetooth: return L("Bluetooth")
         case .trio: return L("3-in-1 status")
         }
-    }
-
-    private func appendFooter(to menu: NSMenu, module: StatsModule? = nil) {
-        menu.addItem(.separator())
-        if module == .disk { appendEjectItems(to: menu) }
-        func add(_ title: String, _ action: Selector) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-        }
-        switch module {
-        case .volume:
-            add(L("Sound Settings…"), #selector(openSoundSettings))
-        case .bluetooth:
-            add(L("Bluetooth Settings…"), #selector(openBluetoothSettings))
-        case .trio:
-            // Quick actions.
-            add(audio?.state?.muted == true ? L("Unmute") : L("Mute"), #selector(toggleMute))
-            menu.items.last?.isEnabled = audio?.state?.canMute == true
-            menu.addItem(.separator())
-            add(L("Wi-Fi Settings…"), #selector(openWiFiSettings))
-            add(L("Sound Settings…"), #selector(openSoundSettings))
-            add(L("Battery Settings…"), #selector(openBatterySettings))
-        case .battery:
-            add(L("Open Activity Monitor"), #selector(openActivityMonitor))
-            add(L("Battery Settings…"), #selector(openBatterySettings))
-        default:
-            add(L("Open Activity Monitor"), #selector(openActivityMonitor))
-        }
-        let prefs = NSMenuItem(title: L("Stats Settings…"), action: #selector(openStatsSettings), keyEquivalent: "")
-        prefs.target = self
-        menu.addItem(prefs)
     }
 
     private func makePanel(_ m: StatsModule) -> StatsPanel {
@@ -556,28 +720,19 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// "Eject <volume>" for every removable / ejectable volume (checked when the menu opens).
-    private func appendEjectItems(to menu: NSMenu) {
+    /// Removable / ejectable volumes (checked when the disk details open).
+    private func ejectableVolumes() -> [(name: String, url: URL)] {
         let keys: Set<URLResourceKey> = [.volumeIsEjectableKey, .volumeIsRemovableKey, .volumeLocalizedNameKey, .volumeIsRootFileSystemKey]
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []
-        var added = false
-        for url in urls {
+        return urls.compactMap { url in
             guard let v = try? url.resourceValues(forKeys: keys), v.volumeIsRootFileSystem != true,
-                  v.volumeIsEjectable == true || v.volumeIsRemovable == true else { continue }
-            let item = NSMenuItem(title: L("Eject %@", v.volumeLocalizedName ?? url.lastPathComponent), action: #selector(eject(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = url
-            menu.addItem(item)
-            added = true
+                  v.volumeIsEjectable == true || v.volumeIsRemovable == true else { return nil }
+            return (v.volumeLocalizedName ?? url.lastPathComponent, url)
         }
-        let utility = NSMenuItem(title: L("Open Disk Utility"), action: #selector(openDiskUtility), keyEquivalent: "")
-        utility.target = self
-        menu.addItem(utility)
-        if added { menu.addItem(.separator()) }
     }
 
-    @objc private func eject(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
+    private func eject(_ url: URL) {
+        presenter.dismiss()
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: url)
         } catch {
@@ -612,22 +767,6 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
         m.start(queue: DispatchQueue(label: "bartap.alerts.path", qos: .utility))
         pathMonitor = m
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        guard let m = module(for: menu) ?? submenuModule(menu) else { return }
-        openMenus += 1
-        // Volume updates by itself (CoreAudio events); Bluetooth reads on its own schedule.
-        if m == .bluetooth { bluetooth?.setDetail(true) } else if m != .volume { engine.setDetail(m, true) }
-    }
-
-    func menuDidClose(_ menu: NSMenu) {
-        guard let m = module(for: menu) ?? submenuModule(menu) else { return }
-        openMenus = max(0, openMenus - 1)
-        if m == .bluetooth { bluetooth?.setDetail(false) } else if m != .volume { engine.setDetail(m, false) }
-        // Drop the panel so a closed dropdown costs nothing.
-        openPanels[m] = nil
-        DispatchQueue.main.async { menu.removeAllItems() }
     }
 
     @objc private func openActivityMonitor() {
@@ -742,6 +881,11 @@ final class StatsController: NSObject, NSMenuDelegate {
                           "age": bluetooth?.updated.map { Date().timeIntervalSince($0) } ?? -1] as [String: Any],
             "wifiBars": last?.wifi?.bars ?? -1,
             "openPanels": openPanels.count,
+            "dormant": dormant.map(\.rawValue).sorted(),
+            "slim": slim,
+            "details": (["target": detailTarget ?? "-", "module": detailModule?.rawValue ?? "-",
+                         "frame": detailWindow.map { NSStringFromRect($0.frame) } ?? "-"] as [String: Any])
+                .merging(presenter.debugInfo) { a, _ in a },
             "ai": [
                 "running": aiEngine != nil,
                 "detected": (aiSnapshot?.detected ?? []).map(\.rawValue).sorted(),
@@ -776,6 +920,11 @@ final class StatsController: NSObject, NSMenuDelegate {
                 DebugRender.view(panel, "panel_\(m.rawValue)_\(dark ? "dark" : "light")", dark: dark)
             }
         }
+    }
+
+    /// Opens an item's details as a click on it would ("cpu", "combined"…), or "close" (debug).
+    func debugShowDetails(_ id: String) {
+        if id == "close" { presenter.dismiss() } else { presenter.itemClicked(id) }
     }
 
     /// Simulates opening a dropdown (debug): builds its panel and samples details for 3 s.

@@ -72,8 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         catalog.ownRun = { [weak self] in
             guard let self, let t = self.bar.toggleItem?.button?.window?.frame.width, t > 0,
                   let h = self.bar.hiddenItem?.button?.window?.frame.width, h > 0 else { return nil }
+            let seen = self.bar.ownFrames().toggle
             return OwnRun(hidden: h, toggle: t, stats: self.stats?.itemWindowWidths() ?? [],
-                          always: self.bar.alwaysItem?.button?.window?.frame.width)
+                          always: self.bar.alwaysItem?.button?.window?.frame.width, toggleRD: seen.width > 0 ? -seen.maxX : nil)
         }
         reveal.ownPanelVisible = { [weak self] in
             (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false) || !(self?.layoutHolds.isEmpty ?? true)
@@ -97,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         statsController.apply()
 
         wireGestures()
+        configureTogglePresenter()
         rules.onChange = { [weak self] level, _ in self?.reveal.setRuleLevel(level) }
         rules.configure(settings.rules)
         applyHotkeys()
@@ -230,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         let row = MenuBarGeometry.row(on: notched, windows: windows)
         guard row.contains(where: \.isOnScreen),
               ToggleVisibility.isDrawn(bar.ownFrames().toggle, row: row, on: notched) == false else { return }
-        Toast.show(L("The BarTap toggle no longer fits beside the notch. Use Settings › Layout › Reset BarTap Positions."),
+        Toast.show(L("The BarTap button doesn't fit beside the notch. In Settings › Layout, move a few icons (stats items too) to Hidden."),
                    symbol: "exclamationmark.triangle")
     }
 
@@ -239,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         reveal.setCleanMode(false)
         reveal.resetRecheckBudget()
         bar.removeAllItems()
-        // Stats items are anchored next to the toggle; re-anchor them to its new position too.
+        // Stats items start next to the toggle again, at its new position.
         stats?.removeItemsForReplacement()
         StatusBarController.clearStoredPositions(.standard)
         placementRetries = 0
@@ -345,7 +347,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
 
     private func handleClick(_ click: StatusBarController.Click) {
         switch click {
-        case .toggle: primaryToggle(source: .click)
+        case .toggle:
+            if reveal.isCleanMode { reveal.setCleanMode(false); return }
+            // Opened some other way (hotkey, scroll, a rule): a click closes it, as before.
+            if togglePresenter.model.shown == nil && toggleOpen { primaryToggle(source: .click) } else { togglePresenter.itemClicked("toggle") }
         case .toggleAll: reveal.toggleAll(source: .click)
         case .menu: bar.showMenu()
         }
@@ -473,8 +478,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             reveal.refresh()
         case "showDivider", "iconStyle":
             reveal.refresh()
-        case "hoverReveal", "hoverDelay", "scrollReveal", "emptyClickReveal", "revealWhileDragging":
+        case "hoverReveal", "hoverDelay", "scrollReveal", "emptyClickReveal", "revealWhileDragging", "toggleHoverOpen":
             configureGestures()
+            applyToggleHover()
         case "rules":
             rules.configure(settings.rules)
         case "stats", "alerts":
@@ -511,6 +517,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         case .search: openSearch()
         case .shelf: shelfPanel?.isVisible == true ? closeShelf() : openShelf()
         case .clean: reveal.setCleanMode(!reveal.isCleanMode)
+        case .downloadVideo:
+            VideoDownloads.shared.showPanel()
         case .keepAwake:
             if keepAwake.isActive { keepAwake.stop() } else { keepAwake.start(minutes: nil, allowDisplaySleep: settings.keepAwakeAllowDisplaySleep) }
             Toast.show(keepAwake.isActive ? L("Keep awake: on") : L("Keep awake: off"), symbol: "cup.and.saucer")
@@ -529,6 +537,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             tip = level == .collapsed ? L("Click to show hidden icons (⌥-click: all)") : L("Click to hide icons")
         }
         bar.updateToggleIcon(expanded: level > .collapsed, badge: badge, tooltip: tip)
+        // Closed some other way (hotkey, a menu command, the shelf's own dismissal): so are the
+        // button's hover/click rules.
+        if level == .collapsed, shelfPanel?.isVisible != true, togglePresenter.model.shown != nil { togglePresenter.dismiss() }
+        if level != lastLevelForStats {
+            lastLevelForStats = level
+            // Once macOS has laid the bar out again.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.updateDormantStats() }
+        }
+    }
+
+    private var lastLevelForStats: RevealLevel?
+
+    // MARK: BarTap button: hover and click
+
+    /// The BarTap button opens like a stats item's details: rest the pointer on it (for the hover
+    /// delay) and the hidden icons, or the shelf, show until the pointer leaves them; click it and
+    /// they stay until a click elsewhere. Same rules and code as the stats (HoverClickPresenter).
+    private let togglePresenter = HoverClickPresenter()
+    private let toggleLocator = StatusItemLocator()
+    /// The open area in each menu bar, from the leftmost drawn icon to the button (cached ~1 s).
+    private var toggleArea: (at: Date, rects: [CGRect])?
+
+    private func configureTogglePresenter() {
+        toggleLocator.items = { [weak self] in
+            guard let w = self?.bar.toggleItem?.button?.window else { return [] }
+            return [StatusItemHitTest.Item(id: "toggle", windowName: "tb_toggle", proxyFrame: SystemQueries.cgRect(fromCocoa: w.frame))]
+        }
+        togglePresenter.inBar = { [weak self] p in self?.toggleLocator.inMenuBar(p) ?? false }
+        togglePresenter.locate = { [weak self] p in self?.toggleLocator.hit(at: p) }
+        togglePresenter.contains = { [weak self] p in self?.toggleOpenArea(contains: p) ?? false }
+        togglePresenter.open = { [weak self] _, _, _ in self?.openFromButton() }
+        togglePresenter.close = { [weak self] in self?.closeFromButton() }
+        applyToggleHover()
+    }
+
+    private func applyToggleHover() {
+        var c = togglePresenter.config
+        c.hoverEnabled = settings.toggleHoverOpen
+        c.dwell = settings.hoverDelay
+        if c != togglePresenter.config { togglePresenter.config = c }
+        togglePresenter.hoverActive = settings.toggleHoverOpen
+    }
+
+    private var toggleOpen: Bool { reveal.effectiveLevel > .collapsed || shelfPanel?.isVisible == true }
+
+    private func openFromButton() {
+        toggleArea = nil
+        if settings.shelfMode == .always { openShelf(); return }
+        closeShelf()
+        reveal.reveal(.revealed, source: .button)
+        if settings.shelfMode == .whenCrowded {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.openShelfIfCrowded() }
+        }
+    }
+
+    private func closeFromButton() {
+        closeShelf()
+        guard reveal.effectiveLevel > .collapsed, !reveal.model.layoutBlocked else { return }
+        // A menu opened from one of the revealed icons keeps them out until it closes.
+        if let busy = reveal.currentBusyReason(), busy == .menuOpen || busy == .popoverOpen {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.togglePresenter.model.shown == nil else { return }
+                self.closeFromButton()
+            }
+            return
+        }
+        reveal.collapseByUser()
+    }
+
+    /// Whether a point (global Cocoa) is where the opened icons are: the shelf (and the gap above
+    /// it), or the stretch of menu bar from the leftmost drawn icon to the button.
+    private func toggleOpenArea(contains p: NSPoint) -> Bool {
+        if let shelf = shelfPanel, shelf.isVisible {
+            var f = shelf.frame.insetBy(dx: -6, dy: -6)
+            if let top = NSScreen.screens.first(where: { $0.frame.contains(p) || $0.frame.contains(shelf.frame.origin) })?.frame.maxY {
+                f.size.height = max(f.height, top - f.minY)   // up to the menu bar it hangs from
+            }
+            if f.contains(p) { return true }
+        }
+        guard reveal.effectiveLevel > .collapsed else { return false }
+        if toggleArea.map({ Date().timeIntervalSince($0.at) > 1 }) ?? true {
+            let windows = SystemQueries.windows(onScreenOnly: false)
+            let screens = SystemQueries.screens(windows: windows)
+            let run = catalog.ownRun?()
+            toggleArea = (Date(), screens.compactMap { s in
+                guard !s.asleep, let t = run?.locate(on: s, windows: windows)?.toggle,
+                      let left = MenuBarGeometry.row(on: s, windows: windows).first(where: \.isOnScreen) else { return nil }
+                return CGRect(x: left.bounds.minX, y: s.frame.minY, width: t.maxX - left.bounds.minX, height: s.menuBarHeight)
+            })
+        }
+        let cg = CGPoint(x: p.x, y: SystemQueries.mainScreenHeight - p.y)
+        return toggleArea?.rects.contains { $0.contains(cg) } ?? false
+    }
+
+    /// Stats items the user put in a hidden section don't need redrawing while it is hidden.
+    /// Decided only when certain: icons hidden, window names visible (Screen Recording) and the
+    /// item left of the divider on an awake display. Otherwise every item keeps updating.
+    private func updateDormantStats() {
+        guard let stats else { return }
+        guard reveal.effectiveLevel == .collapsed, !reveal.isCleanMode else { stats.dormant = []; return }
+        let windows = SystemQueries.windows(onScreenOnly: false)
+        let screens = SystemQueries.screens(windows: windows)
+        func awake(_ w: WindowInfo) -> Bool {
+            screens.first(where: { $0.frame.contains(CGPoint(x: w.bounds.midX, y: w.bounds.midY)) })?.asleep == false
+        }
+        guard let divider = windows.first(where: { $0.layer == WindowLevel.status && $0.name == "tb_hidden" }), awake(divider) else {
+            stats.dormant = []
+            return
+        }
+        var dormant: Set<StatsModule> = []
+        for w in windows where w.layer == WindowLevel.status && abs(w.bounds.minY - divider.bounds.minY) <= 1 {
+            guard let name = w.name, name.hasPrefix("tb_stats_"), w.bounds.maxX <= divider.bounds.minX + 1,
+                  let m = StatsModule(rawValue: String(name.dropFirst("tb_stats_".count))) else { continue }
+            dormant.insert(m)
+        }
+        stats.dormant = dormant
     }
 
     // MARK: Search & shelf
@@ -551,7 +675,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         panel.onActivate = { [weak self] item in self?.activate(item) }
         panel.onOpenSettings = { [weak self] in self?.requestAccessibility() }
         panel.onRequestImages = { ItemImages.request() }
-        panel.onClosed = { [weak self] in self?.configureGestures() }
+        panel.onClosed = { [weak self] in
+            guard let self else { return }
+            self.configureGestures()
+            // Closed on its own (an icon opened from it, a click elsewhere): so is the button's open state.
+            if self.reveal.effectiveLevel == .collapsed, self.togglePresenter.model.shown != nil { self.togglePresenter.dismiss() }
+        }
         shelfPanel = panel
         let windows = SystemQueries.windows(onScreenOnly: false)
         let screens = SystemQueries.screens(windows: windows)
@@ -712,7 +841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
 
     func revealForLayout(_ on: Bool) { holdLayout("capture", on) }
 
+    func setStatsSlim(_ on: Bool) { if !layoutApplier.running { stats?.slim = on } }
+
     var barCollapsed: Bool { reveal.effectiveLevel == .collapsed }
+
+    func statsItemImage(_ identifier: String) -> NSImage? { stats?.itemImage(identifier) }
 
     /// Reveals every icon while anything holds the layout (the pane, a running Apply), and puts the
     /// bar back as it was once nothing does.
@@ -735,11 +868,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     /// Settings › Layout's Apply: moves icons until the bar matches `request` (see LayoutApplier).
     func applyLayout(_ request: LayoutApplier.Request, progress: @escaping (Int, Int) -> Void, completion: @escaping (LayoutApplier.Report) -> Void) {
         guard !layoutApplier.running else { return }
-        let wasRevealed = reveal.effectiveLevel == .revealedAll
         holdLayout("apply", true)
+        // BarTap's own stats items step aside meanwhile (see StatsController.slim): a bar too narrow
+        // for every icon (beside the notch) then draws them all, dividers included.
+        stats?.slim = true
         lastLayoutApply = "running"
-        // A bar that was just revealed needs a moment to draw every icon.
-        DispatchQueue.main.asyncAfter(deadline: .now() + (wasRevealed ? 0 : 1.0)) { [weak self] in
+        // A bar that was just revealed (or rearranged) needs a moment to draw every icon.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
             self.layoutApplier.run(request, progress: { [weak self] k, n in
                 self?.lastLayoutApply = "running \(k)/\(n)"
@@ -749,6 +884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
                 self.layoutApplyRuns += 1
                 self.lastLayoutApply = "#\(self.layoutApplyRuns) \(report.finish) moves=\(report.moves) stuck=\(report.stuck.count) notDrawn=\(report.notDrawn.count) left=\(report.left) ["
                     + self.layoutApplier.log.joined(separator: "; ") + "]"
+                self.stats?.slim = false
                 // The pane captures the new order before the bar goes back (no flash in between).
                 completion(report)
                 self.holdLayout("apply", false)
@@ -871,6 +1007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "layoutApplying": layoutApplier.running,
             "layoutPaneOpen": layoutHolds.contains("capture"),
             "crowding": barCollapsed ? (LayoutPaneModel.crowdedDisplays() ?? "") : "",
+            "button": togglePresenter.debugInfo.merging(["source": reveal.model.userSource?.rawValue ?? ""]) { a, _ in a },
             // Displays that draw BarTap's run (toggle, then every stats item) by exact window widths.
             "ownRunOn": { () -> [Int] in
                 let windows = SystemQueries.windows(onScreenOnly: false)
@@ -899,6 +1036,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     func closeSettingsForTesting() { settingsWC?.close() }
 
     func debugSetHiddenLength(_ v: CGFloat) { bar.hiddenItem?.length = v }
+
+    func debugToggleClick() { handleClick(.toggle) }
+
+    func debugOwnWindowNumbers() -> [String: Any] {
+        func info(_ item: NSStatusItem?) -> [String: Any] {
+            guard let w = item?.button?.window else { return [:] }
+            return ["number": w.windowNumber, "x": Double(w.frame.minX), "w": Double(w.frame.width)]
+        }
+        var out: [String: Any] = ["toggle": info(bar.toggleItem), "hidden": info(bar.hiddenItem)]
+        for (name, item) in stats?.debugItems() ?? [] { out[name] = info(item) }
+        return out
+    }
 
     /// What Accessibility sees in the menu bar, as JSON (debug; local only).
     func debugCatalog() {
@@ -1074,6 +1223,23 @@ enum Debug {
             app.applyLayout(.init(arrangement: wanted, alwaysSection: app.settings.alwaysHiddenEnabled, touched: touched), progress: { _, _ in }, completion: { _ in })
         case "layout-cancel":
             app.cancelLayoutApply()
+        case let w where w.hasPrefix("stats-details-"):
+            // A stats item's details, as a click opens them ("stats-details-close" closes them).
+            app.stats?.debugShowDetails(String(w.dropFirst("stats-details-".count)))
+        case "toggle-click":
+            // The BarTap button's click, as from its button (debug).
+            app.debugToggleClick()
+        case "slim-on", "slim-off":
+            app.stats?.slim = what == "slim-on"
+        case "own-windows":
+            // BarTap's in-process window numbers next to the window server's status windows (debug).
+            let own = app.debugOwnWindowNumbers()
+            let rows = SystemQueries.windows(onScreenOnly: false).filter { $0.layer == WindowLevel.status }.map {
+                ["id": Int($0.id), "name": $0.name ?? "", "x": Double($0.bounds.minX), "y": Double($0.bounds.minY), "w": Double($0.bounds.width), "on": $0.isOnScreen] as [String: Any]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: ["own": own, "windows": rows], options: [.prettyPrinted]) {
+                try? data.write(to: dir.appendingPathComponent("own-windows.json"))
+            }
         default:
             break
         }

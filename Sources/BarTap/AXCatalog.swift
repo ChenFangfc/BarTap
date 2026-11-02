@@ -11,7 +11,7 @@ struct BarItem {
     let appName: String
     let title: String
     let identifier: String?
-    let frame: CGRect
+    var frame: CGRect
     let element: AXUIElement
     var section: Section = .shown
     /// Distance of the right edge from the bar's right edge (larger = further left).
@@ -123,7 +123,11 @@ final class AXCatalog {
                 let result = Self.items(pid: pid, bundleID: bundle, appName: name)
                 if result.hung { hung.append(pid); continue }
                 if pid == ownPID {
-                    for item in result.items { if let id = item.identifier { own[id] = item.frame } }
+                    for item in result.items {
+                        guard let id = item.identifier else { continue }
+                        // BarTap's stats items are icons like any other: Settings › Layout arranges them.
+                        if id.hasPrefix("bartap.stats.") { items.append(item) } else { own[id] = item.frame }
+                    }
                 } else {
                     items.append(contentsOf: result.items)
                 }
@@ -139,6 +143,17 @@ final class AXCatalog {
                 own["bartap.toggle"] = onRef(found.toggle)
                 own["bartap.hidden"] = onRef(found.hidden)
                 if let a = found.always { own["bartap.always"] = onRef(a) }
+            }
+            // BarTap's own stats items: Accessibility reports their places late (and swapped for a
+            // while); the window server knows, by the names it gives status item windows (their
+            // autosave names, visible with Screen Recording), in the same main-display coordinates.
+            let named = Dictionary(SystemQueries.windows(onScreenOnly: false).compactMap { w -> (String, CGRect)? in
+                guard w.layer == WindowLevel.status, let n = w.name, n.hasPrefix("tb_stats_"),
+                      screens.first(where: { $0.frame.contains(CGPoint(x: w.bounds.midX, y: w.bounds.midY)) })?.asleep == false else { return nil }
+                return (String(n.dropFirst("tb_stats_".count)), w.bounds)
+            }, uniquingKeysWith: { first, _ in first })
+            for i in items.indices where items[i].pid == ownPID {
+                if let id = items[i].identifier, let w = named[String(id.dropFirst("bartap.stats.".count))] { items[i].frame = w }
             }
             Self.classify(&items, own: own, screens: screens)
             DispatchQueue.main.async {

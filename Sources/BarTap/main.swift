@@ -35,12 +35,28 @@ if let i = trioArgs.firstIndex(of: "--trio-render"), i + 1 < trioArgs.count {
     TrioProbe.render(to: URL(fileURLWithPath: trioArgs[i + 1]), live: trioArgs.contains("--live"))
     exit(0)
 }
+if trioArgs.contains("--presenter-check") {
+    TrioProbe.presenterCheck()
+    exit(0)
+}
+if let i = trioArgs.firstIndex(of: "--detail-render"), i + 1 < trioArgs.count {
+    DetailRender.render(to: URL(fileURLWithPath: trioArgs[i + 1]))
+    exit(0)
+}
 if let i = trioArgs.firstIndex(of: "--trio-cpu"), i + 1 < trioArgs.count {
     TrioProbe.cpu(seconds: Double(trioArgs[i + 1]) ?? 60, detail: trioArgs.contains("--detail"))
     exit(0)
 }
 // Headless video-download checks (--video-download, --ytdlp-install, --render-downloads).
 if let status = VideoDownloadCLI.handle(CommandLine.arguments) { exit(status) }
+// Never start the menu bar app from a bare build product (`swift build` / `swift run`): without
+// its bundle it has no identity, so the one-BarTap-at-a-time check below can't see the installed
+// copy, and a second toggle and divider would land in the menu bar (and write a "BarTap" defaults
+// domain). This is also where a mistyped or unknown headless option ends up.
+guard Bundle.main.bundleIdentifier != nil else {
+    FileHandle.standardError.write(Data("BarTap: not starting the menu bar app outside BarTap.app (unknown option?)\n".utf8))
+    exit(64)
+}
 
 // One-time migration of settings (and the user's menu bar arrangement) from the app's
 // previous name, Tidybar.
