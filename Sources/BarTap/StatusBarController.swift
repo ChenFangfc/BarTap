@@ -57,6 +57,13 @@ final class StatusBarController: NSObject {
         defaults.set(seeds.hidden, forKey: preferredPositionKey(Name.hidden))
     }
 
+    /// Exact keys for all three items (Settings › Layout places each divider in a chosen gap).
+    static func storeKeys(toggle: Double, hidden: Double, always: Double?, in defaults: UserDefaults) {
+        defaults.set(toggle, forKey: preferredPositionKey(Name.toggle))
+        defaults.set(hidden, forKey: preferredPositionKey(Name.hidden))
+        if let always { defaults.set(always, forKey: preferredPositionKey(Name.always)) }
+    }
+
     static func clearStoredPositions(_ defaults: UserDefaults) {
         for n in [Name.toggle, Name.hidden, Name.always] { defaults.removeObject(forKey: preferredPositionKey(n)) }
     }
@@ -128,7 +135,9 @@ final class StatusBarController: NSObject {
     /// Collapsed dividers use a fixed, very large length (macOS clamps it to ~5,000 pt).
     /// Shorter "just wide enough" lengths save ~10 MB of backing store but were measured to
     /// trigger a macOS 26 layout state where one display draws the divider and hides every other
-    /// icon (clock included); the long length never did.
+    /// icon (clock included); the long length never did. (Measured 2026-11: the memory is AppKit's
+    /// snapshot of the item for each other display, NSStatusItemReplicantView, ~3.4 MB per copy
+    /// at this length; neither hiding the button nor freezing its contents avoids it.)
     func collapsedLength() -> CGFloat { Self.collapsedLength }
 
     func apply(level: RevealLevel, showDividers: Bool) {
@@ -245,8 +254,8 @@ final class StatusBarController: NSObject {
             sep.behavior = []
             cleanSeparator = sep
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak sep] in
-                guard let sep, self?.cleanSeparator === sep else { return }
-                sep.length = Self.collapsedLength
+                guard let self, let sep, self.cleanSeparator === sep else { return }
+                self.setLength(sep, Self.collapsedLength)
             }
         } else {
             if let s = cleanSeparator { NSStatusBar.system.removeStatusItem(s) }

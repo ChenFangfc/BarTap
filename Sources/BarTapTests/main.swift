@@ -661,6 +661,78 @@ test("ai: Claude Code's cached plan usage") {
     expect(ClaudePlanCache.status(fromClaudeJSON: pretty)?.windows.first?.usedPercent == 12, "pretty-printed, as Claude Code writes it")
 }
 
+test("own run: BarTap's items found by width in the window list") {
+    let screen = ScreenInfo(id: 9, frame: CGRect(x: 0, y: -1692, width: 3008, height: 1692), menuBarHeight: 30)
+    // Right to left as macOS lays them out: clock, Control Center, Battery, stats (ai … cpu), toggle, │, Wi-Fi, input, ‖, LogiMos.
+    func row(_ widths: [CGFloat], wideAt: Int? = nil) -> [WindowInfo] {
+        var x = screen.frame.maxX
+        var out: [WindowInfo] = []
+        for (i, w) in widths.enumerated() {
+            let width = i == wideAt ? 5016 : w
+            x -= width
+            out.append(WindowInfo(id: UInt32(i + 1), pid: 1, ownerName: "Control Center", layer: WindowLevel.status,
+                                  bounds: CGRect(x: x, y: screen.frame.minY, width: width, height: 30), isOnScreen: x >= 0))
+        }
+        return out
+    }
+    let widths: [CGFloat] = [132, 42, 76, 218, 63, 67, 60, 47, 31, 18, 38, 44, 18, 38]
+    let run = OwnRun(hidden: 18, toggle: 31, stats: [47, 60, 67, 63, 218], always: 18)
+    let open = row(widths)
+    guard let found = run.locate(screens: [screen], windows: open) else { expect(false, "found open"); return }
+    expect(found.toggle == open[8].bounds && found.hidden == open[9].bounds && found.always == open[12].bounds, "\(found)")
+    // Collapsed: │ is 5,016 pt wide; the row stops there, the run is still found.
+    let collapsed = row(widths, wideAt: 9)
+    let c = run.locate(screens: [screen], windows: collapsed)
+    expect(c?.toggle == collapsed[8].bounds && c?.hidden.width == 5016, "\(String(describing: c))")
+    // Different stats widths (another app with similar icons) don't match.
+    expect(OwnRun(hidden: 18, toggle: 31, stats: [47, 61], always: nil).locate(screens: [screen], windows: open) == nil)
+    // No visible bar: nothing found.
+    let asleep = open.map { w -> WindowInfo in var w = w; w.isOnScreen = false; return w }
+    expect(run.locate(screens: [screen], windows: asleep) == nil)
+}
+
+test("ai: Claude usage credits, limit kinds, stale windows") {
+    // Claude Code's cache as of late 2026 (numbers made up): extra usage on, a session limit that
+    // repeats five_hour, no weekly limit.
+    let json = Data(#"""
+    {"cachedUsageUtilization":{"fetchedAtMs":1793555494833,"utilization":{
+      "five_hour":{"utilization":12,"resets_at":null,"limit_dollars":null,"used_dollars":null,"remaining_dollars":null},
+      "seven_day":null,"seven_day_opus":null,
+      "extra_usage":{"is_enabled":true,"monthly_limit":500000,"used_credits":123456,"utilization":24.69,"currency":"USD","decimal_places":2,"spend_limit_reached":false},
+      "limits":[{"kind":"session","group":"session","percent":12,"resets_at":null,"scope":null},
+                {"kind":"weekly_scoped","percent":38,"scope":{"model":{"display_name":"Fable"}}},
+                {"kind":"mystery","percent":99}],
+      "spend":{"used":{"amount_minor":123456,"currency":"USD","exponent":2},"limit":{"amount_minor":500000,"currency":"USD","exponent":2},"percent":24,"enabled":true}}}}
+    """#.utf8)
+    guard let st = ClaudePlanCache.status(fromClaudeJSON: json), let spend = st.spend else { expect(false, "parsed with credits"); return }
+    expect(spend.used == 1234.56 && spend.limit == 5000 && spend.currency == "USD" && !spend.limitReached, "\(spend)")
+    expect(st.windows.map(\.minutes) == [300, 10_080] && st.windows[1].scope == "Fable", "session not doubled, unknown kinds skipped: \(st.windows)")
+    expect(spend.amount(left: false) == 1234.56 && abs((spend.amount(left: true) ?? 0) - 3765.44) < 0.001)
+    expect(abs((spend.fraction(left: false) ?? 0) - 0.246912) < 1e-6 && abs((spend.fraction(left: true) ?? 0) - 0.753088) < 1e-6)
+    // Only the newer "spend" block: same numbers.
+    let spendOnly = Data(#"{"cachedUsageUtilization":{"fetchedAtMs":1793555494833,"utilization":{"spend":{"used":{"amount_minor":250,"currency":"EUR","exponent":2},"limit":{"amount_minor":250,"exponent":2},"enabled":true}}}}"#.utf8)
+    let s2 = ClaudePlanCache.status(fromClaudeJSON: spendOnly)?.spend
+    expect(s2?.used == 2.5 && s2?.currency == "EUR" && s2?.limitReached == true, "\(String(describing: s2))")
+    // Turned off: no credits.
+    let off = Data(#"{"cachedUsageUtilization":{"fetchedAtMs":1,"utilization":{"five_hour":{"utilization":5},"extra_usage":{"is_enabled":false,"used_credits":0}}}}"#.utf8)
+    expect(ClaudePlanCache.status(fromClaudeJSON: off)?.spend == nil)
+    // A 5-hour figure without a reset time means nothing 5 hours after it was read.
+    let read = st.updated
+    expect(st.current(now: read.addingTimeInterval(3600)).count == 2)
+    expect(st.current(now: read.addingTimeInterval(6 * 3600)).map(\.minutes) == [10_080], "5h dropped, 7d kept")
+    expect(st.tightest(now: read.addingTimeInterval(8 * 86_400)) == nil)
+    // The menu bar figure carries the credits of the agents counted.
+    var book = AIUsageBook()
+    book.add(AIUsageEntry(agent: .codex, model: "gpt-5.5", date: read, tokens: TokenCounts(input: 10)), calendar: .current)
+    let d = AIDisplay.make(book: book, plans: [.claudeCode: st], agents: [.claudeCode, .codex], range: .today, now: read,
+                           calendar: .current, prices: { _ in nil })
+    expect(d.total.spend == spend && d.perAgent.first { $0.agent == .codex }?.figure.spend == nil)
+    expect(AIFormat.money(1234.56, currency: "USD") == "$1,235" && AIFormat.money(98.5, currency: "USD") == "$98.50")
+    expect(AIFormat.money(9000, currency: "USD") == "$9,000" && AIFormat.money(1_234_567, currency: "EUR") == "€1,234,567")
+    expect(AIFormat.compactMoney(6814.43, currency: "USD") == "$6.8K" && AIFormat.compactMoney(12.3, currency: "EUR") == "€12.30")
+    expect(StatsModule.ai.elements.contains(.aiCredits) && StatsModule.ai.presets.contains([.aiCredits]))
+}
+
 test("ai: plan limits as used or left") {
     let w = AIPlanWindow(minutes: 300, usedPercent: 43, resetsAt: nil)
     expect(w.percent(left: false) == 43 && w.percent(left: true) == 57)

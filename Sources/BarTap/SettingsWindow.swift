@@ -23,6 +23,9 @@ protocol SettingsHost: AnyObject {
     func pickColor()
     func restartMenuBarHost()
     func reopenSettings()
+    func layoutPaneVisible(_ visible: Bool)
+    func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], completion: @escaping (Bool) -> Void)
+    var menuBarIsDark: Bool { get }
 }
 
 /// Built on demand and released when closed, so it costs nothing while you are not using it.
@@ -47,21 +50,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
-        let panes: [(String, String, (Form) -> Void)] = [
-            (L("General"), "gearshape", buildGeneral),
-            (L("Reveal"), "cursorarrow.motionlines", buildReveal),
-            (L("Hotkeys"), "command", buildHotkeys),
-            (L("Rules"), "wand.and.stars", buildRules),
-            (L("Layout"), "menubar.rectangle", buildLayout),
-            (L("Stats"), "chart.xyaxis.line", buildStats),
-            (L("Power-ups"), "bolt", buildPowerUps),
-            (L("About"), "info.circle", buildAbout),
+        // Unbound builders: a pane not opened yet must not keep this controller alive.
+        let panes: [(String, String, (SettingsWindowController) -> (Form) -> Void)] = [
+            (L("General"), "gearshape", SettingsWindowController.buildGeneral),
+            (L("Reveal"), "cursorarrow.motionlines", SettingsWindowController.buildReveal),
+            (L("Hotkeys"), "command", SettingsWindowController.buildHotkeys),
+            (L("Rules"), "wand.and.stars", SettingsWindowController.buildRules),
+            (L("Layout"), "menubar.rectangle", SettingsWindowController.buildLayout),
+            (L("Stats"), "chart.xyaxis.line", SettingsWindowController.buildStats),
+            (L("Power-ups"), "bolt", SettingsWindowController.buildPowerUps),
+            (L("About"), "info.circle", SettingsWindowController.buildAbout),
         ]
         for (title, symbol, build) in panes {
-            let form = Form()
-            build(form)
-            forms.append(form)
-            let vc = PaneController(form: form)
+            // Each pane is built the first time its tab shows: most visits touch one or two.
+            let vc = PaneController { [weak self] form in
+                guard let self else { return }
+                build(self)(form)
+                self.forms.append(form)
+            }
             let item = NSTabViewItem(viewController: vc)
             item.label = title
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
@@ -94,6 +100,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         host?.setHotkeysSuspended(false)
+        host?.layoutPaneVisible(false)
         onClose?()
     }
 
@@ -242,18 +249,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildLayout(_ f: Form) {
-        f.section(L("How it works"))
-        f.note(L("Hold ⌘ and drag icons in the menu bar. Icons left of the │ divider are hidden; icons left of the ‖ divider are always hidden; icons right of the BarTap toggle are always shown. BarTap never moves icons itself."))
-        f.buttons([
-            (L("Reveal Everything"), { [weak self] in self?.host?.revealEverything() }),
-            (L("Reset BarTap Positions"), { [weak self] in self?.host?.resetPositions() }),
-        ])
-
-        f.section(L("Current layout"))
-        let lists = LayoutListView()
-        f.custom(nil, lists)
-        f.buttons([(L("Refresh"), { [weak self] in self?.reloadLayout(lists) })])
-        reloadLayout(lists)
+        f.section(L("Menu bar"))
+        let model = LayoutPaneModel(host: host)
+        f.keep(model)
+        let scroll = NSScrollView()
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.documentView = model.strip
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.widthAnchor.constraint(equalToConstant: 592).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 86).isActive = true
+        f.custom(nil, scroll)
+        f.custom(nil, model.status)
+        f.note(L("Drag │ to choose which icons are hidden: the ones left of it. With the Always Hidden section on, drag ‖ for the icons that stay hidden until you ⌥-click. To change the order of the icons themselves, hold ⌘ and drag them in the menu bar; every icon stays shown while this page is open."))
+        let allow = f.button(L("Allow Screen Recording…")) { ItemImages.request() }
+        model.permissionButton = allow
+        f.toggle(L("Enable the Always Hidden section"),
+                 get: { [unowned self] in s.alwaysHiddenEnabled }, set: { [unowned self] in s.alwaysHiddenEnabled = $0 })
+        f.button(L("Reset BarTap Positions")) { [weak self] in self?.host?.resetPositions() }
+        f.onAppear { model.start() }
+        f.onDisappear { model.stop() }
 
         f.section(L("Icon spacing"))
         f.popup(L("Spacing between icons"), options: [
@@ -274,14 +290,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         f.toggle(L("Show a restore button while the menu bar is clean"),
                  help: L("Clean mode hides every third-party icon (for screenshots, recordings and presentations)."),
                  get: { [unowned self] in s.cleanShowsExitButton }, set: { [unowned self] in s.cleanShowsExitButton = $0 })
-    }
-
-    private func reloadLayout(_ view: LayoutListView) {
-        guard AXCatalog.isTrusted else {
-            view.show(message: L("Grant Accessibility access to see which icons are in each section."))
-            return
-        }
-        host?.catalogSnapshot { items in view.show(items: items) }
     }
 
     private func buildStats(_ f: Form) {
@@ -443,58 +451,29 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 }
 
 private final class PaneController: NSViewController {
-    let form: Form
-    init(form: Form) {
-        self.form = form
+    private let form = Form()
+    private var build: ((Form) -> Void)?
+    init(build: @escaping (Form) -> Void) {
+        self.build = build
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
-    override func loadView() { view = form.makeView() }
+    override func loadView() {
+        build?(form)
+        build = nil
+        view = form.makeView()
+    }
     override func viewWillAppear() {
         super.viewWillAppear()
         form.refresh()
     }
-}
-
-/// Three rows of icons: Shown / Hidden / Always Hidden.
-final class LayoutListView: NSStackView {
-    init() {
-        super.init(frame: .zero)
-        orientation = .vertical
-        alignment = .leading
-        spacing = 6
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        form.appeared()
     }
-    required init?(coder: NSCoder) { fatalError() }
-
-    func show(message: String) {
-        arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let l = NSTextField(wrappingLabelWithString: message)
-        l.textColor = .secondaryLabelColor
-        addArrangedSubview(l)
-    }
-
-    func show(items: [BarItem]) {
-        arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let groups: [(String, BarItem.Section)] = [(L("Shown"), .shown), (L("Hidden"), .hidden), (L("Always Hidden"), .alwaysHidden)]
-        for (title, section) in groups {
-            let members = items.filter { $0.section == section }
-            let label = NSTextField(labelWithString: "\(title) (\(members.count))")
-            label.font = .systemFont(ofSize: 11, weight: .medium)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.widthAnchor.constraint(equalToConstant: 110).isActive = true
-            var views: [NSView] = [label]
-            for m in members.prefix(24) {
-                let iv = NSImageView(image: m.icon)
-                iv.toolTip = "\(m.title) — \(m.appName)"
-                iv.translatesAutoresizingMaskIntoConstraints = false
-                iv.widthAnchor.constraint(equalToConstant: 18).isActive = true
-                iv.heightAnchor.constraint(equalToConstant: 18).isActive = true
-                views.append(iv)
-            }
-            if members.count > 24 { views.append(NSTextField(labelWithString: "+\(members.count - 24)")) }
-            let row = NSStackView(views: views)
-            row.spacing = 6
-            addArrangedSubview(row)
-        }
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        form.disappeared()
     }
 }
+

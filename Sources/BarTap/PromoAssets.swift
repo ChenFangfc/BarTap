@@ -94,7 +94,8 @@ enum PromoAssets {
             .claudeCode: AIPlanStatus(agent: .claudeCode, plan: nil, windows: [
                 AIPlanWindow(minutes: 300, usedPercent: 43, resetsAt: promoNow.addingTimeInterval(2 * 3600 + 20 * 60)),
                 AIPlanWindow(minutes: 10_080, usedPercent: 61, resetsAt: promoNow.addingTimeInterval(3 * 86_400)),
-            ], credits: nil, updated: promoNow.addingTimeInterval(-300)),
+            ], credits: nil, updated: promoNow.addingTimeInterval(-300),
+               spend: AISpend(used: 1234.56, limit: 5000, currency: "USD")),
             .codex: AIPlanStatus(agent: .codex, plan: "plus", windows: [
                 AIPlanWindow(minutes: 10_080, usedPercent: 18, resetsAt: promoNow.addingTimeInterval(4 * 86_400 + 3600)),
             ], credits: nil, updated: promoNow.addingTimeInterval(-60)),

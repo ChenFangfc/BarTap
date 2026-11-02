@@ -13,6 +13,10 @@ final class Form {
     private var targets: [ClosureTarget] = []
     /// Refreshers run when the pane appears so controls reflect external changes.
     private var refreshers: [() -> Void] = []
+    private var appearHandlers: [() -> Void] = []
+    private var disappearHandlers: [() -> Void] = []
+    /// Helper objects that live as long as the pane.
+    private var kept: [AnyObject] = []
 
     init() {
         stack.orientation = .vertical
@@ -22,6 +26,12 @@ final class Form {
     }
 
     func refresh() { refreshers.forEach { $0() } }
+
+    func onAppear(_ h: @escaping () -> Void) { appearHandlers.append(h) }
+    func onDisappear(_ h: @escaping () -> Void) { disappearHandlers.append(h) }
+    func keep(_ object: AnyObject) { kept.append(object) }
+    func appeared() { appearHandlers.forEach { $0() } }
+    func disappeared() { disappearHandlers.forEach { $0() } }
 
     private func target(_ h: @escaping (Any?) -> Void) -> ClosureTarget {
         let t = ClosureTarget(h)

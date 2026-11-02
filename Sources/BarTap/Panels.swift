@@ -283,11 +283,11 @@ final class ShelfPanel: FloatingPanel {
         orderFrontRegardless()
     }
 
-    /// Swaps in captured images, keyed by `BarItem.key`, at menu bar size.
+    /// Swaps in captured images, keyed by `BarItem.slotKey`, at menu bar size.
     func updateImages(_ images: [String: NSImage]) {
         guard !images.isEmpty else { return }
         for (i, item) in items.enumerated() where i < buttons.count {
-            guard let img = images[item.key], img.size.height > 0 else { continue }
+            guard let img = images[item.slotKey], img.size.height > 0 else { continue }
             let scale = min(1, Self.iconHeight / img.size.height)
             let size = NSSize(width: img.size.width * scale, height: img.size.height * scale)
             let sized = NSImage(size: size, flipped: false) { r in img.draw(in: r); return true }

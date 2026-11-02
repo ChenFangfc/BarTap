@@ -11,7 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     private let hotkeys = HotkeyCenter()
     private let gestures = MouseGestures()
     private let rules = RuleMonitor()
-    private let catalog = AXCatalog()
+    let catalog = AXCatalog()
+    private let placer = DividerPlacer()
+    /// Settings › Layout is showing: every icon stays revealed so it can be seen and ⌘-dragged.
+    private var layoutPaneOpen = false
+    private var levelBeforeLayoutPane: RevealLevel?
+    /// Last divider move from Settings › Layout (debug), and whether one is still under way.
+    private(set) var lastLayoutMove = ""
+    private(set) var layoutMoving = false
     private(set) var stats: StatsController?
     private var searchPanel: SearchPanel?
     private var shelfPanel: ShelfPanel?
@@ -61,8 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         bar.onCleanExitClick = { [weak self] in self?.reveal.setCleanMode(false) }
         bar.menuProvider = { [weak self] in self?.buildMenu() ?? NSMenu() }
         reveal.onChange = { [weak self] in self?.stateChanged() }
+        catalog.ownRun = { [weak self] in
+            guard let self, let t = self.bar.toggleItem?.button?.window?.frame.width, t > 0,
+                  let h = self.bar.hiddenItem?.button?.window?.frame.width, h > 0 else { return nil }
+            return OwnRun(hidden: h, toggle: t, stats: self.stats?.itemWindowWidths() ?? [],
+                          always: self.bar.alwaysItem?.button?.window?.frame.width)
+        }
         reveal.ownPanelVisible = { [weak self] in
-            (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false)
+            (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false) || (self?.layoutPaneOpen ?? false)
         }
         keepAwake.onChange = { [weak self] in self?.stateChanged() }
 
@@ -147,7 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         // it sat half a second ago and every visible bar shows it, drawn or not. Laying out a few
         // new items on three displays takes macOS a couple of seconds.
         let arriving = stats.map { $0.awaitingItems || Date().timeIntervalSince($0.itemsCreatedAt) < 0.8 } ?? false
-        let moving = toggle != lastMeasuredToggle || bars.contains { $0.drawn == nil }
+        // A bar that doesn't list the toggle at all is usually still laying out; past two seconds it
+        // is one that can't draw it (then measured below like any other).
+        let moving = toggle != lastMeasuredToggle || bars.contains { $0.drawn == nil } && placementWaits < 4
         lastMeasuredToggle = toggle
         if storedKey == nil || toggle.width <= 0 || arriving || moving, placementWaits < 30 {
             placementWaits += 1
@@ -673,6 +688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             wc.onClose = { [weak self] in
                 // Release the whole window hierarchy; it is rebuilt on demand.
                 DispatchQueue.main.async { self?.settingsWC = nil }
+                Memory.returnFreedPages(after: 1.0)
             }
             settingsWC = wc
         }
@@ -690,6 +706,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     func revealEverything() { reveal.reveal(.revealedAll, source: .command) }
 
     func catalogSnapshot(_ completion: @escaping ([BarItem]) -> Void) { catalog.snapshot(completion: completion) }
+
+    func layoutPaneVisible(_ visible: Bool) {
+        guard visible != layoutPaneOpen else { return }
+        layoutPaneOpen = visible
+        if visible {
+            levelBeforeLayoutPane = reveal.effectiveLevel
+            reveal.reveal(.revealedAll, source: .command)
+        } else if levelBeforeLayoutPane == .collapsed {
+            reveal.collapseByUser()
+        }
+    }
+
+    var menuBarIsDark: Bool {
+        bar.toggleItem?.button?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    /// Settings › Layout: puts │ (or ‖) in gap `gap` of `items`, listed left to right as measured now.
+    /// Finds keys that land there (see DividerPlacer), then re-creates BarTap's items with them.
+    func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], completion: @escaping (Bool) -> Void) {
+        layoutMoving = true
+        moveDivider(handle, toGap: gap, items: items, retries: 1) { [weak self] ok in
+            self?.layoutMoving = false
+            completion(ok)
+        }
+    }
+
+    /// Re-creating our items can make macOS re-sort other icons too, so the result is checked once
+    /// placement settles and, if it landed elsewhere, measured and placed again (once).
+    private func moveDivider(_ handle: LayoutHandle, toGap gap: Int, items: [BarItem], retries: Int, completion: @escaping (Bool) -> Void) {
+        let d = UserDefaults.standard
+        func stored(_ name: String) -> Double? { d.object(forKey: StatusBarController.preferredPositionKey(name)) as? Double }
+        let hiddenGap = items.filter { $0.section != .shown }.count
+        let alwaysGap: Int? = settings.alwaysHiddenEnabled ? items.filter { $0.section == .alwaysHidden }.count : nil
+        placer.keys(forGap: gap, among: items, estimate: estimatedKey(forGap: gap, items: items)) { [weak self] range in
+            guard let self else { return }
+            self.lastLayoutMove = "\(handle) to \(gap): \(range.map { String(format: "%.2f…%.2f", $0.low, $0.high) } ?? "no key") in \(self.placer.lastTries) tries ["
+                + self.placer.lastLog.joined(separator: " ") + "]"
+            guard let r = range else { completion(false); return }
+            let room = r.high - r.low
+            switch handle {
+            case .hidden:
+                // Stats items take keys just below the toggle's: leave them room above the gap's floor.
+                let toggle = min(r.high - room * 0.1, r.low + max(0.3, room * 0.35))
+                let hidden = toggle + min(0.25, (r.high - toggle) / 2)
+                var always = stored("tb_always")
+                if let a = alwaysGap, a >= gap { always = hidden + min(0.25, (r.high - hidden) / 2) }
+                self.placeDividers(toggle: toggle, hidden: hidden, always: alwaysGap == nil ? nil : always)
+            case .always:
+                guard let toggle = stored("tb_toggle"), let hidden = stored("tb_hidden") else { completion(false); return }
+                // In the divider's own gap ‖ has to sit left of │.
+                let always = gap >= hiddenGap ? hidden + max(0.01, min(0.25, (r.high - hidden) / 2)) : (r.low + r.high) / 2
+                self.placeDividers(toggle: toggle, hidden: hidden, always: always)
+            }
+            self.afterPlacementSettles { [weak self] in
+                guard let self, retries > 0 else { completion(true); return }
+                self.catalog.snapshot { items in
+                    let got = handle == .hidden ? items.filter { $0.section != .shown }.count : items.filter { $0.section == .alwaysHidden }.count
+                    guard got != gap else { completion(true); return }
+                    self.moveDivider(handle, toGap: gap, items: items, retries: retries - 1, completion: completion)
+                }
+            }
+        }
+    }
+
+    private func afterPlacementSettles(_ then: @escaping () -> Void, waited: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            if self.placementSettling, waited < 40 { self.afterPlacementSettles(then, waited: waited + 1) } else { then() }
+        }
+    }
+
+    /// The probe's first guess: the gap's distance from the right, less BarTap's own items right of
+    /// it (other apps' keys were mostly stored before those were there).
+    private func estimatedKey(forGap gap: Int, items: [BarItem]) -> Double {
+        let boundary: CGFloat = gap < items.count ? items[gap].order + items[gap].frame.width : max(1, (items.last?.order ?? 2) - 1)
+        let toggle = bar.ownFrames().toggle
+        let ownWidth = 31 + (stats?.shownWidth() ?? 0) + 20
+        return Double(max(1, boundary - (toggle.width > 0 && boundary > -toggle.minX ? ownWidth : 0)))
+    }
+
+    /// Re-creates BarTap's items with exact keys: like a reset, but in the spot the user chose. The
+    /// placement check afterwards still keeps the toggle visible on every bar.
+    func placeDividers(toggle: Double, hidden: Double, always: Double?) {
+        settings.placementPending = false
+        settings.provisionalToggleKey = nil
+        placementSettling = true
+        placementRetries = 0
+        placementWaits = 0
+        lastMeasuredToggle = nil
+        pendingPlacementCheck?.cancel()
+        bar.removeAllItems()
+        stats?.removeItemsForReplacement()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            StatusBarController.storeKeys(toggle: toggle, hidden: hidden, always: always, in: .standard)
+            self.bar.createItems(alwaysHidden: self.settings.alwaysHiddenEnabled)
+            self.reveal.refresh()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.stats?.apply()
+                self?.verifyFirstPlacement()
+            }
+        }
+    }
 
     func requestAccessibility() {
         AXCatalog.requestTrust()
@@ -800,6 +919,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "settingsControllersAlive": SettingsWindowController.liveCount,
             "resetCount": resetCount,
             "placementSettling": placementSettling,
+            "layoutMove": lastLayoutMove,
+            "layoutMoving": layoutMoving,
+            "layoutPaneOpen": layoutPaneOpen,
+            "screenRecording": ItemImages.permitted,
+            // macOS's padding around each of our items (window width = length + this).
+            "itemSpacing": UserDefaults.standard.integer(forKey: "NSStatusItemSpacing"),
+            "imageCache": ItemImages.cache.count,
+            "captureLog": ItemImages.lastLog,
             "jitter": jitterResults,
             "commits": reveal.commits,
             "watchdogRuns": reveal.watchdogRuns,
@@ -961,6 +1088,24 @@ enum Debug {
             app.debugPress(String(w.dropFirst("press-".count)))
         case "close-menu":
             app.debugCloseMenu()
+        case "layout-render":
+            // The Settings › Layout strip as it would show now, rendered to a file (debug).
+            let model = LayoutPaneModel(host: app)
+            model.start()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7.0) {
+                for dark in [false, true] { DebugRender.view(model.strip, "layout_strip_\(dark ? "dark" : "light")", dark: dark) }
+                model.stop()
+            }
+        case "layout-open":
+            app.layoutPaneVisible(true)
+        case "layout-close":
+            app.layoutPaneVisible(false)
+        case let w where w.hasPrefix("move-hidden-") || w.hasPrefix("move-always-"):
+            // Move a divider to a gap of the current layout, as dragging it in Settings › Layout does.
+            let handle: LayoutHandle = w.hasPrefix("move-hidden-") ? .hidden : .always
+            if let gap = Int(w.dropFirst("move-hidden-".count)) {
+                app.catalogSnapshot { items in app.moveDivider(handle, toGap: gap, items: items) { _ in } }
+            }
         default:
             break
         }

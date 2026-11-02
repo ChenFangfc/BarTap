@@ -247,7 +247,7 @@ public enum StatsModule: String, CaseIterable {
         case .sensors: return [.label, .temperature, .fan, .tempFan, .power]
         case .battery: return [.label, .battery, .percent, .timeLeft]
         case .time: return [.clock]
-        case .ai: return [.label, .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo]
+        case .ai: return [.label, .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits]
         }
     }
 
@@ -262,7 +262,8 @@ public enum StatsModule: String, CaseIterable {
         case .sensors: return [[.temperature], [.tempFan], [.temperature, .fan], [.power], [.label, .temperature]]
         case .battery: return [[.battery, .percent], [.percent], [.timeLeft], [.battery], [.battery, .timeLeft]]
         case .time: return [[.clock]]
-        case .ai: return [[.aiTokensCost], [.aiCost], [.label, .aiTokens], [.aiPlan, .aiPlanPercent], [.aiPlanTwo], [.label, .aiTokensCost]]
+        case .ai: return [[.aiTokensCost], [.aiCost], [.label, .aiTokens], [.aiPlan, .aiPlanPercent], [.aiPlanTwo], [.label, .aiTokensCost],
+                          [.aiCredits], [.aiPlanTwo, .aiCredits]]
         }
     }
 
@@ -302,6 +303,7 @@ public enum StatsElement: String, CaseIterable {
     case aiPlan       // ring: the plan window closest to its limit
     case aiPlanPercent // 43%
     case aiPlanTwo    // two lines: 5h 43% / 7d 61%
+    case aiCredits    // ring + $2.2K: usage credits used (or left) of the monthly limit
 
     /// The single display mode of BarTap 1.0, as elements.
     public static func fromLegacyMode(_ mode: String) -> [StatsElement]? {

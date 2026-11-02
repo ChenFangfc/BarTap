@@ -112,11 +112,13 @@ enum StatsRenderer {
         case .aiTokensCost: return max(textWidth("888.8M", lineFont), textWidth("$88.88", lineFont))
         case .aiPlan: return pieSize
         case .aiPlanPercent: return percentBox
-        case .aiPlanTwo: return planLabelWidth + 3 + textWidth("100%", lineFont)
+        case .aiPlanTwo: return planLabelWidth + 2 + textWidth("100%", lineFont)
+        case .aiCredits: return pieSize + 3 + creditsBox
         }
     }
 
-    private static var planLabelWidth: CGFloat { textWidth("88d", lineFont) }
+    private static var planLabelWidth: CGFloat { max(textWidth("5h", lineFont), textWidth("7d", lineFont)) }
+    private static var creditsBox: CGFloat { max(textWidth("$88.88", valueFont), textWidth("$88.8K", valueFont)) }
     private static var tagWidth: CGFloat { ["CC", "CX", "GM", "OC"].map { textWidth($0, tagFont) }.max() ?? 14 }
     private static let tagFont = NSFont.systemFont(ofSize: 8.5, weight: .heavy)
 
@@ -201,15 +203,25 @@ enum StatsRenderer {
         case .aiPlan: ring((f?.windows.first?.percent(left: o.aiPlanLeft) ?? 0) / 100, center: NSPoint(x: r.minX + pieSize / 2, y: r.midY))
         case .aiPlanPercent: single(f?.windows.first.map { "\(Int($0.percent(left: o.aiPlanLeft).rounded()))%" } ?? "–", box: r)
         case .aiPlanTwo:
-            // The two windows by length (5h above 7d), labels fixed, percentages right-aligned.
+            // The two windows by length (5h above 7d). Labels and the numbers' left edges are fixed;
+            // left-aligned numbers keep the gap after the label small whatever their length.
             let byLength = (f?.windows ?? []).sorted { $0.minutes < $1.minutes }.prefix(2)
             let rows = Array(byLength) + Array(repeating: nil as AIPlanWindow?, count: 2 - byLength.count).compactMap { $0 }
             for (i, top) in [true, false].enumerated() {
                 let w = i < rows.count ? rows[i] : nil
                 label(w?.shortName ?? "", x: r.minX, top: top)
                 text(w.map { "\(Int($0.percent(left: o.aiPlanLeft).rounded()))%" } ?? (i == 0 ? "–" : ""), lineFont,
-                     NSRect(x: r.minX + planLabelWidth + 3, y: top ? 10.5 : 0.5, width: r.width - planLabelWidth - 3, height: 11), align: .right)
+                     NSRect(x: r.minX + planLabelWidth + 2, y: top ? 10.5 : 0.5, width: r.width - planLabelWidth - 2, height: 11), align: .left)
             }
+        case .aiCredits:
+            // Usage credits: a ring for the share of the monthly limit, then the amount (used or left).
+            let spend = f?.spend
+            if let fraction = spend?.fraction(left: o.aiPlanLeft) {
+                ring(fraction, center: NSPoint(x: r.minX + pieSize / 2, y: r.midY))
+            }
+            let amount = spend.flatMap { s in s.amount(left: o.aiPlanLeft).map { AIFormat.compactMoney($0, currency: s.currency) } }
+            // Left-aligned: amounts vary in length ($0.83, $1.2K), and a right-aligned one leaves an odd gap.
+            single(amount ?? "–", box: NSRect(x: r.minX + pieSize + 3, y: r.minY, width: r.width - pieSize - 3, height: r.height), align: .left)
         default: break
         }
     }
@@ -278,7 +290,7 @@ enum StatsRenderer {
             single(timeLeftText(s), box: r)
         case .clock:
             single(clockText(o.clockFormat, now), box: r, align: .center)
-        case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo:
+        case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits:
             break
         }
     }
@@ -540,6 +552,7 @@ enum StatsRenderer {
             func sig(_ f: AIFigure?) -> String {
                 guard let f else { return "-" }
                 return AIFormat.tokens(f.tokens) + "/" + AIFormat.cost(f.cost) + "/" + f.windows.map { "\($0.minutes):\(Int($0.usedPercent.rounded()))" }.joined(separator: ",")
+                    + "/" + (f.spend.map { AIFormat.compactMoney($0.used, currency: $0.currency) + ":" + String(Int(($0.fraction(left: false) ?? 0) * 100)) } ?? "-")
             }
             let parts = o.aiTags.isEmpty ? [sig(s?.ai?.total)] : o.aiTags.map { tag in sig(s?.ai?.perAgent.first { $0.agent.tag == tag }?.figure) }
             return head + "|" + o.aiTags.joined(separator: ",") + (o.aiPlanLeft ? "|left|" : "|used|") + parts.joined(separator: "#")
@@ -576,7 +589,7 @@ enum StatsRenderer {
             case .battery: return "\(s.battery?.percent ?? -1)|\(s.battery?.charging ?? false)"
             case .timeLeft: return timeLeftText(s)
             case .clock: return clockText(o.clockFormat, now)
-            case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo: return ""
+            case .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits: return ""
             }
         }
         return head + "|" + parts.joined(separator: "#")
@@ -599,7 +612,8 @@ enum StatsRenderer {
         case .time: return ""
         case .ai:
             guard let a = s.ai else { return "AI usage" }
-            return "AI usage \(a.range.rawValue): \(AIFormat.tokens(a.total.tokens)) tokens, \(AIFormat.cost(a.total.cost))"
+            let credits = a.total.spend.map { s in ", usage credits " + AIFormat.money(s.used, currency: s.currency) + (s.limit.map { " of " + AIFormat.money($0, currency: s.currency) } ?? "") } ?? ""
+            return "AI usage \(a.range.rawValue): \(AIFormat.tokens(a.total.tokens)) tokens, \(AIFormat.cost(a.total.cost))" + credits
         }
     }
 }

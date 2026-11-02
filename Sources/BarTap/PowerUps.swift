@@ -143,3 +143,12 @@ enum ProcessStats {
         return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
     }
 }
+
+/// Freed memory stays with the process until malloc happens to reuse it. After a one-off burst
+/// (the Settings window, the first read of the AI history) hand it back, so the footprint returns
+/// to its steady size instead of keeping the peak.
+enum Memory {
+    static func returnFreedPages(after delay: TimeInterval = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { _ = malloc_zone_pressure_relief(nil, 0) }
+    }
+}

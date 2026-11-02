@@ -44,6 +44,9 @@ if let id = Bundle.main.bundleIdentifier,
    NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0.processIdentifier != getpid() }) {
     exit(0)
 }
+// A little tighter than macOS's 16 pt between BarTap's own items (stats sit side by side). It is
+// a registered default, so a spacing the user picked for every app (Settings › Layout) still wins.
+UserDefaults.standard.register(defaults: ["NSStatusItemSpacing": 10])
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

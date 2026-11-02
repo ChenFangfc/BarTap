@@ -97,7 +97,7 @@ let rows: [(String, [String])] = [
     ("Memory", ["memory-preset1", "memory-preset2", "memory-preset0", "memory-preset7", "memory-preset5"]),
     ("Disk", ["disk-preset1", "disk-preset2", "disk-preset3", "disk-preset7", "disk-preset0"]),
     ("Network · Sensors · Battery", ["network-preset0", "network-preset2", "sensors-preset1", "battery-preset0", "battery-preset4"]),
-    ("AI usage", ["ai-preset5", "ai-preset1", "ai-preset3", "ai-preset4", "ai-peragent0"]),
+    ("AI usage", ["ai-preset5", "ai-preset6", "ai-preset3", "ai-preset4", "ai-peragent0"]),
 ]
 let chipGap: CGFloat = 10, chipPad: CGFloat = 8, rowH: CGFloat = 30, labelW: CGFloat = 190, lm: CGFloat = 20
 let rowImages = rows.map { ($0.0, $0.1.map { asset("gallery/\($0).png") }) }

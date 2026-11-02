@@ -201,6 +201,8 @@ final class AIUsageEngine {
         prune()
         publish()
         markDirty()
+        // A first read parses gigabytes in passing; give the freed memory back.
+        if firstRead { Memory.returnFreedPages(after: 1.0) }
     }
 
     /// Log files per agent (Gemini also kept whole sessions as .json before switching to JSONL).
@@ -560,7 +562,11 @@ enum JSONLines {
         guard fd >= 0 else { return offset }
         defer { close(fd) }
         guard lseek(fd, off_t(offset), SEEK_SET) >= 0 else { return offset }
-        var capacity = 4 << 20
+        // Usually only a few new lines: size the buffer to what was added (4 MB at most; it grows
+        // for a longer line).
+        var st = stat()
+        let pending = fstat(fd, &st) == 0 ? Int(max(0, Int64(st.st_size) - Int64(offset))) : 4 << 20
+        var capacity = min(4 << 20, max(64 << 10, pending + 1))
         var buffer = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
         defer { buffer.deallocate() }
         var filled = 0

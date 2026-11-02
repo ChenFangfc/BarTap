@@ -19,13 +19,42 @@ struct BarItem {
 
     /// Stable-ish identity for per-item hotkeys: bundle + AX identifier/title.
     var key: String { "\(bundleID)|\(identifier ?? title)" }
+    /// Names one icon for its captured image: its app, its Accessibility identifier and its place
+    /// among that app's icons (left to right). Titles can't be used: many carry live values (iStat
+    /// Menus' "CPU 25%", a calendar's current event).
+    var slotKey = ""
 
     var icon: NSImage {
         if let symbol = Icons.systemItemSymbol(for: "\(identifier ?? "") \(title)"),
            bundleID.hasPrefix("com.apple.") {
             return Icons.symbol(symbol, config: .init(pointSize: 15, weight: .regular))
         }
-        return NSRunningApplication(processIdentifier: pid)?.icon ?? NSImage(named: NSImage.applicationIconName)!
+        return AppIcons.thumbnail(pid: pid, bundleID: bundleID)
+    }
+}
+
+/// App icons as small thumbnails. `NSRunningApplication.icon` keeps the full icon (up to 1024 px,
+/// many representations) decoded for as long as the app runs; a 24 pt bitmap is all we draw.
+enum AppIcons {
+    private static var cache: [String: NSImage] = [:]
+
+    static func thumbnail(pid: pid_t, bundleID: String) -> NSImage {
+        if let hit = cache[bundleID] { return hit }
+        let source = NSRunningApplication(processIdentifier: pid)?.bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) }
+            ?? NSImage(named: NSImage.applicationIconName)!
+        let size = NSSize(width: 24, height: 24)
+        let thumb = NSImage(size: size)
+        if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 48, pixelsHigh: 48, bitsPerSample: 8, samplesPerPixel: 4,
+                                      hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+            rep.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            source.draw(in: NSRect(origin: .zero, size: size))
+            NSGraphicsContext.restoreGraphicsState()
+            thumb.addRepresentation(rep)
+        }
+        cache[bundleID] = thumb
+        return thumb
     }
 }
 
@@ -60,6 +89,8 @@ final class AXCatalog {
     }
 
     private let queue = DispatchQueue(label: "bartap.ax", qos: .userInitiated)
+    /// Window widths of our own items (main thread), to find where they really are; see `OwnRun`.
+    var ownRun: (() -> OwnRun?)?
 
     init() {
         // Applies to every element we touch (children inherit the global default, not the app
@@ -83,6 +114,7 @@ final class AXCatalog {
         }
         let skip = unresponsiveUntil.filter { $0.value > Date() }.map(\.key)
         let screens = SystemQueries.screens()
+        let run = ownRun?()
         queue.async { [weak self] in
             var items: [BarItem] = []
             var own: [String: CGRect] = [:]
@@ -95,6 +127,18 @@ final class AXCatalog {
                 } else {
                     items.append(contentsOf: result.items)
                 }
+            }
+            // Sections from where our items really are: their Accessibility frames lag for seconds
+            // after they are re-created. Those frames still say which display Accessibility uses.
+            if let run, let t = own["bartap.toggle"], let ref = MenuBarSections.referenceScreen(toggle: t, screens: screens),
+               let found = run.locate(screens: screens, windows: SystemQueries.windows(onScreenOnly: false)) {
+                func onRef(_ f: CGRect) -> CGRect {
+                    let rd = found.screen.frame.maxX - f.maxX
+                    return CGRect(x: ref.frame.maxX - rd - f.width, y: ref.frame.minY + 4, width: f.width, height: 22)
+                }
+                own["bartap.toggle"] = onRef(found.toggle)
+                own["bartap.hidden"] = onRef(found.hidden)
+                if let a = found.always { own["bartap.always"] = onRef(a) }
             }
             Self.classify(&items, own: own, screens: screens)
             DispatchQueue.main.async {
@@ -142,6 +186,20 @@ final class AXCatalog {
         return (out, false)
     }
 
+    /// BarTap's own items as Accessibility reports them (it mirrors the real bar; the in-process
+    /// proxy frames can lag behind), by identifier; items without one are keyed by position.
+    func ownExtras(completion: @escaping ([String: CGRect]) -> Void) {
+        guard Self.isTrusted else { completion([:]); return }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        queue.async {
+            var out: [String: CGRect] = [:]
+            for (i, item) in Self.items(pid: pid, bundleID: "", appName: "").items.enumerated() {
+                out[item.identifier ?? "item\(i)"] = item.frame
+            }
+            DispatchQueue.main.async { completion(out) }
+        }
+    }
+
     /// Every app's extras, our own included, unclassified (debug).
     func rawDump(completion: @escaping ([[String: Any]]) -> Void) {
         let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }
@@ -176,6 +234,13 @@ final class AXCatalog {
         }
         // Left to right, as in the menu bar.
         items.sort { $0.order > $1.order }
+        var seen: [String: Int] = [:]
+        for i in items.indices {
+            let base = "\(items[i].bundleID)|\(items[i].identifier ?? "")"
+            let n = seen[base, default: 0]
+            seen[base] = n + 1
+            items[i].slotKey = "\(base)#\(n)"
+        }
     }
 
     /// "Clicks" an icon through Accessibility (AXPress), which opens its menu without moving the

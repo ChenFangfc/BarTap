@@ -14,6 +14,9 @@ for f in sorted((root / "Sources").rglob("*.swift")):
 table = (root / "Sources/BarTapCore/ZhHans.swift").read_text(encoding="utf-8")
 entry = re.compile(r'^\s*"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*$', re.M)
 have = {m.group(1): m.group(2) for m in entry.finditer(table)}
+# A key twice in a Swift dictionary literal traps at launch, so it must fail the build.
+seen = [m.group(1) for m in entry.finditer(table)]
+dups = sorted({k for k in seen if seen.count(k) > 1})
 if "--list" in sys.argv:
     for k in keys:
         print(k)
@@ -26,8 +29,9 @@ def specs(x):
     # Positional forms (%2$@) are valid reorderings; compare the conversions themselves.
     return sorted(re.sub(r'%\d+\$', '%', m) for m in spec.findall(x))
 bad = [k for k in keys if k in have and specs(k) != specs(have[k])]
+for k in dups: print(f"duplicate zh key: {k!r}")
 for k in missing: print(f"missing zh: {k!r}  ({keys[k]})")
 for k in bad: print(f"format mismatch: {k!r} -> {have[k]!r}")
 for k in unused: print(f"note: unused zh key: {k!r}")
-print(f"{len(keys)} strings, {len(missing)} missing, {len(bad)} format mismatches")
-sys.exit(1 if missing or bad else 0)
+print(f"{len(keys)} strings, {len(missing)} missing, {len(bad)} format mismatches, {len(dups)} duplicates")
+sys.exit(1 if missing or bad or dups else 0)

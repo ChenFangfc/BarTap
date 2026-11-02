@@ -45,6 +45,7 @@ enum StatsNames {
         case .aiPlan: return L("Plan usage ring")
         case .aiPlanPercent: return L("Plan usage %")
         case .aiPlanTwo: return L("Plan windows (5h / 7d)")
+        case .aiCredits: return L("Usage credits (ring + amount)")
         }
     }
 
@@ -76,6 +77,7 @@ enum StatsNames {
         case .aiPlan: return L("Plan ring")
         case .aiPlanPercent: return L("Plan %")
         case .aiPlanTwo: return "5h/7d"
+        case .aiCredits: return L("Credits")
         }
     }
 

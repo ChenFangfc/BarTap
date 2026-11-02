@@ -13,6 +13,12 @@ final class StatsController: NSObject, NSMenuDelegate {
     /// When the last stats item was added to the bar (placement checks wait for it to settle).
     private(set) var itemsCreatedAt = Date.distantPast
 
+    /// Window widths of the stats items, left to right (see `OwnRun`).
+    func itemWindowWidths() -> [CGFloat] {
+        if let c = combinedItem { return [c.button?.window?.frame.width ?? 0] }
+        return settings.statsModules.compactMap { items[$0]?.button?.window?.frame.width }
+    }
+
     /// Wanted items that don't exist yet (apply() waits for the toggle's position first).
     var awaitingItems: Bool {
         let wanted = settings.statsModules

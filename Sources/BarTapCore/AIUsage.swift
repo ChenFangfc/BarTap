@@ -154,6 +154,32 @@ public struct AIPlanWindow: Equatable, Codable {
     }
 }
 
+/// Usage credits ("extra usage" on Claude plans): billed at API prices once the plan's own limits
+/// run out, up to a monthly limit.
+public struct AISpend: Equatable, Codable {
+    public var used: Double
+    public var limit: Double?
+    public var currency: String
+    public var limitReached: Bool
+
+    public init(used: Double, limit: Double?, currency: String, limitReached: Bool = false) {
+        self.used = used
+        self.limit = limit
+        self.currency = currency
+        self.limitReached = limitReached
+    }
+
+    /// The amount used, or what is left of the limit.
+    public func amount(left: Bool) -> Double? { left ? limit.map { max(0, $0 - used) } : used }
+
+    /// 0…1 of the limit, used or left; nil without a limit.
+    public func fraction(left: Bool) -> Double? {
+        guard let limit, limit > 0 else { return nil }
+        let used = min(max(self.used / limit, 0), 1)
+        return left ? 1 - used : used
+    }
+}
+
 public struct AIPlanStatus: Equatable, Codable {
     public var agent: AIAgent
     public var plan: String?
@@ -161,19 +187,27 @@ public struct AIPlanStatus: Equatable, Codable {
     /// Remaining prepaid credits, when the agent reports them.
     public var credits: Double?
     public var updated: Date
+    /// Usage credits spent this month, when the plan has them turned on.
+    public var spend: AISpend?
 
-    public init(agent: AIAgent, plan: String?, windows: [AIPlanWindow], credits: Double?, updated: Date) {
+    public init(agent: AIAgent, plan: String?, windows: [AIPlanWindow], credits: Double?, updated: Date, spend: AISpend? = nil) {
         self.agent = agent
         self.plan = plan
         self.windows = windows
         self.credits = credits
         self.updated = updated
+        self.spend = spend
     }
 
-    /// The window closest to its limit (what a single menu bar number should show). Windows that
-    /// already reset are ignored.
+    /// Windows whose numbers still mean something: not reset yet and, when the reset time is
+    /// unknown, read less than one window ago (a 5-hour figure from this morning says nothing now).
+    public func current(now: Date) -> [AIPlanWindow] {
+        windows.filter { ($0.resetsAt ?? updated.addingTimeInterval(Double($0.minutes) * 60)) > now }
+    }
+
+    /// The window closest to its limit (what a single menu bar number should show).
     public func tightest(now: Date) -> AIPlanWindow? {
-        windows.filter { ($0.resetsAt ?? .distantFuture) > now }.max { $0.usedPercent < $1.usedPercent }
+        current(now: now).max { $0.usedPercent < $1.usedPercent }
     }
 }
 
@@ -845,6 +879,36 @@ public enum AIFormat {
         default: return String(format: "$%.1fK", usd / 1_000)
         }
     }
+
+    /// Like `cost`, in any currency (€12.34, €1.2K).
+    public static func compactMoney(_ v: Double, currency: String) -> String {
+        let usd = cost(v)
+        return currency == "USD" ? usd : symbol(currency) + usd.dropFirst()
+    }
+
+    /// $2,185.57; whole units from 1,000 up.
+    public static func money(_ v: Double, currency: String) -> String {
+        let digits = abs(v) >= 1_000 ? 0 : 2
+        let grouped = String(format: "%.\(digits)f", v).split(separator: ".", omittingEmptySubsequences: false)
+        var whole = String(grouped[0])
+        var out = ""
+        while whole.count > 3 {
+            out = "," + whole.suffix(3) + out
+            whole.removeLast(3)
+        }
+        out = whole + out + (grouped.count > 1 ? "." + grouped[1] : "")
+        return symbol(currency) + out
+    }
+
+    private static func symbol(_ currency: String) -> String {
+        switch currency {
+        case "USD": return "$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "JPY", "CNY": return "¥"
+        default: return currency + " "
+        }
+    }
 }
 
 // MARK: - What the menu bar shows
@@ -857,6 +921,8 @@ public struct AIFigure: Equatable {
     public var partlyPriced = false
     /// Plan windows, fullest first (only agents that report limits).
     public var windows: [AIPlanWindow] = []
+    /// Usage credits, for the agent whose plan has them.
+    public var spend: AISpend?
     public init() {}
 }
 
@@ -880,8 +946,8 @@ public struct AIDisplay: Equatable {
             f.tokens = t.tokens.total
             f.cost = t.cost
             f.partlyPriced = t.unpricedTokens > 0
-            f.windows = set.compactMap { plans[$0] }.flatMap { p in p.windows.filter { ($0.resetsAt ?? .distantFuture) > now } }
-                .sorted { $0.usedPercent > $1.usedPercent }
+            f.windows = set.compactMap { plans[$0] }.flatMap { $0.current(now: now) }.sorted { $0.usedPercent > $1.usedPercent }
+            f.spend = AIAgent.allCases.lazy.filter(set.contains).compactMap { plans[$0]?.spend }.first
             return f
         }
         var d = AIDisplay()
@@ -1007,15 +1073,37 @@ public enum ClaudePlanCache {
         var windows = [window("five_hour", minutes: 300), window("seven_day", minutes: 10_080),
                        window("seven_day_opus", minutes: 10_080, scope: "Opus"), window("seven_day_sonnet", minutes: 10_080, scope: "Sonnet")]
             .compactMap { $0 }
-        // Newer model-scoped weekly caps.
+        // The newer list of limits: weekly ones, some scoped to a model, and the session (5-hour)
+        // limit, which repeats five_hour. Other kinds are not shown.
         for l in (o["limits"] as? [[String: Any]]) ?? (utilization["limits"] as? [[String: Any]]) ?? [] {
-            guard let percent = (l["percent"] as? NSNumber)?.doubleValue else { continue }
+            guard let percent = (l["percent"] as? NSNumber)?.doubleValue, let kind = l["kind"] as? String else { continue }
             let model = ((l["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
-            windows.append(AIPlanWindow(minutes: 10_080, usedPercent: percent, resetsAt: resetDate(l["resets_at"]), scope: model))
+            let minutes: Int
+            if kind.hasPrefix("weekly") { minutes = 10_080 } else if kind == "session" { minutes = 300 } else { continue }
+            guard !windows.contains(where: { $0.minutes == minutes && $0.scope == model }) else { continue }
+            windows.append(AIPlanWindow(minutes: minutes, usedPercent: percent, resetsAt: resetDate(l["resets_at"]), scope: model))
+        }
+        // Usage credits ("extra usage"): amounts in minor units (cents).
+        var spend: AISpend?
+        if let e = utilization["extra_usage"] as? [String: Any], e["is_enabled"] as? Bool == true,
+           let usedMinor = (e["used_credits"] as? NSNumber)?.doubleValue {
+            let scale = pow(10, Double((e["decimal_places"] as? NSNumber)?.intValue ?? 2))
+            spend = AISpend(used: usedMinor / scale, limit: (e["monthly_limit"] as? NSNumber).map { $0.doubleValue / scale },
+                            currency: e["currency"] as? String ?? "USD", limitReached: e["spend_limit_reached"] as? Bool ?? false)
+        } else if let s = utilization["spend"] as? [String: Any], s["enabled"] as? Bool == true, let used = money(s["used"]) {
+            let limit = money(s["limit"])?.value
+            spend = AISpend(used: used.value, limit: limit, currency: used.currency ?? "USD",
+                            limitReached: limit.map { used.value >= $0 } ?? false)
         }
         let remaining = ((utilization["five_hour"] as? [String: Any])?["remaining_dollars"] as? NSNumber)?.doubleValue
-        guard !windows.isEmpty || remaining != nil else { return nil }
-        return AIPlanStatus(agent: .claudeCode, plan: nil, windows: windows, credits: remaining, updated: fetched)
+        guard !windows.isEmpty || remaining != nil || spend != nil else { return nil }
+        return AIPlanStatus(agent: .claudeCode, plan: nil, windows: windows, credits: remaining, updated: fetched, spend: spend)
+    }
+
+    /// {"amount_minor": 218557, "exponent": 2, "currency": "USD"} → 2185.57.
+    private static func money(_ v: Any?) -> (value: Double, currency: String?)? {
+        guard let m = v as? [String: Any], let minor = (m["amount_minor"] as? NSNumber)?.doubleValue else { return nil }
+        return (minor / pow(10, Double((m["exponent"] as? NSNumber)?.intValue ?? 2)), m["currency"] as? String)
     }
 
     private static func resetDate(_ v: Any?) -> Date? {

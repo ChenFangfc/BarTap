@@ -118,10 +118,14 @@ public enum MenuBarSections {
     /// section; nil for icons in no menu bar (macOS 26 parks icons it doesn't show at the bottom of
     /// the screen) and for zero-width ones. macOS reports every app's extras on one display, hidden
     /// ones far off its left edge, so one reference bar measures them all.
+    /// The display whose bar Accessibility reports our toggle (and every other icon) in.
+    public static func referenceScreen(toggle: CGRect, screens: [ScreenInfo]) -> ScreenInfo? {
+        screens.first { inMenuBar(toggle, of: $0) && $0.frame.minX <= toggle.midX && toggle.midX <= $0.frame.maxX }
+    }
+
     public static func classify(_ frames: [CGRect], toggle: CGRect, hidden: CGRect, always: CGRect?,
                                 screens: [ScreenInfo]) -> [(rd: CGFloat, section: ExtraSection)?] {
-        guard let ref = screens.first(where: { inMenuBar(toggle, of: $0) && $0.frame.minX <= toggle.midX && toggle.midX <= $0.frame.maxX })
-        else { return frames.map { _ in nil } }
+        guard let ref = referenceScreen(toggle: toggle, screens: screens) else { return frames.map { _ in nil } }
         func rd(_ f: CGRect) -> CGFloat? { f.width > 0 && inMenuBar(f, of: ref) ? ref.frame.maxX - f.maxX : nil }
         guard let hiddenRD = rd(hidden) else { return frames.map { _ in nil } }
         // Dividers grow leftwards from a fixed right edge, so an icon is hidden when its right edge
@@ -133,6 +137,61 @@ public enum MenuBarSections {
             if let a = alwaysLeft, d >= a - 1 { return (d, .alwaysHidden) }
             return (d, d >= hiddenLeft - 1 ? .hidden : .shown)
         }
+    }
+}
+
+/// BarTap's own items where the window server really drew them. Our in-process frames (and
+/// Accessibility, which reads them) can lag for seconds after the items are re-created, and even
+/// flip back and forth; the window list can't. macOS draws ours as one run, │ then the toggle then
+/// the stats items, whose window widths we know exactly, so that run is found by its widths in a
+/// bar that is visible. ‖ is the nearest window of its own width further left (an open divider is
+/// far narrower than any icon).
+public struct OwnRun: Equatable {
+    public var hidden: CGFloat
+    public var toggle: CGFloat
+    public var stats: [CGFloat]
+    public var always: CGFloat?
+
+    public init(hidden: CGFloat, toggle: CGFloat, stats: [CGFloat], always: CGFloat?) {
+        self.hidden = hidden
+        self.toggle = toggle
+        self.stats = stats
+        self.always = always
+    }
+
+    /// The run's windows as frames on `screen` (the bar it was found in), or nil.
+    public func locate(screens: [ScreenInfo], windows: [WindowInfo]) -> (screen: ScreenInfo, toggle: CGRect, hidden: CGRect, always: CGRect?)? {
+        let pattern = [toggle] + stats
+        func same(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 0.75 }
+        for screen in screens {
+            let row = MenuBarGeometry.row(on: screen, windows: windows)
+            guard row.contains(where: \.isOnScreen), row.count >= pattern.count else { continue }
+            for j in 0...(row.count - pattern.count) where zip(row[j...], pattern).allSatisfy({ same($0.bounds.width, $1) }) {
+                // │ right before the toggle: open (in the row), or collapsed (the wide window the row stopped at).
+                let divider: CGRect
+                if j > 0, same(row[j - 1].bounds.width, hidden) {
+                    divider = row[j - 1].bounds
+                } else if j == 0, let wide = windows.first(where: {
+                    $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
+                        && $0.bounds.width >= separatorWidthThreshold && abs($0.bounds.maxX - row[0].bounds.minX) <= 2.5
+                }) {
+                    divider = wide.bounds
+                } else {
+                    continue
+                }
+                var alwaysFrame: CGRect?
+                if let always {
+                    alwaysFrame = row[..<max(0, j - 1)].last(where: { same($0.bounds.width, always) })?.bounds
+                        ?? windows.first(where: {   // collapsed: the wide window left of the hidden section
+                            $0.layer == WindowLevel.status && abs($0.bounds.minY - screen.frame.minY) <= 1
+                                && $0.bounds.width >= separatorWidthThreshold && $0.bounds.maxX <= divider.minX + 2.5
+                                && $0.bounds != divider
+                        })?.bounds
+                }
+                return (screen, row[j].bounds, divider, alwaysFrame)
+            }
+        }
+        return nil
     }
 }
 

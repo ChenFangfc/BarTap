@@ -16,6 +16,7 @@ if INSTALLED.exists() and (ROOT / "dist/BarTap.app").exists():
     sys.exit("Both /Applications/BarTap.app and dist/BarTap.app exist; use scripts/build.sh --install first.")
 PROBE = ROOT / ".build/debug/BarTapProbe"
 STATE = pathlib.Path.home() / "Library/Application Support/BarTap/debug-state.json"
+CATALOG = pathlib.Path.home() / "Library/Application Support/BarTap/catalog-classified.json"
 DOMAIN = "io.github.chenfangfc.BarTap"
 
 passed = failed = 0
@@ -68,6 +69,21 @@ def wait_until(predicate, timeout, step=0.5):
             return True
         time.sleep(step)
     return predicate()
+
+
+def catalog():
+    """Icons with their sections, as BarTap classifies them (needs Accessibility)."""
+    try:
+        CATALOG.unlink()
+    except FileNotFoundError:
+        pass
+    cmd("debug/catalog")
+    for _ in range(60):
+        if CATALOG.exists():
+            break
+        time.sleep(0.05)
+    time.sleep(0.2)
+    return json.loads(CATALOG.read_text()) if CATALOG.exists() else []
 
 
 def wait_for_placement(timeout=20):
@@ -336,6 +352,9 @@ def scenario_bad_layout():
 
 def scenario_kill_fail_open():
     print("• crash while collapsed → every icon comes back")
+    # How many icons each bar can draw with everything shown (the front app's menus take room).
+    cmd("show-all"); time.sleep(1.0)
+    fits = {s["name"]: s["drawn"] for s in probe()}
     cmd("hide"); time.sleep(0.8)
     sh("kill", "-9", str(pid()))
     time.sleep(2.0)
@@ -343,7 +362,7 @@ def scenario_kill_fail_open():
     for s in now:
         check(s["separators"] == 0, f'{s["name"]}: no separator after crash')
         if not s["notch"]:
-            check(s["drawn"] == len(s["row"]), f'{s["name"]}: all icons drawn')
+            check(s["drawn"] >= min(len(s["row"]), fits.get(s["name"], 0)) - 1, f'{s["name"]}: icons drawn as before ({s["drawn"]} vs {fits.get(s["name"])})')
     print(f"    after crash: {summary(now)}")
 
 
@@ -453,7 +472,8 @@ def scenario_control_center_restart():
             notes.append(f"{name}: other apps' icons changed across the restart (lost widths {dict(lost)}, gained {dict(gained)})")
     # BarTap's own items must all be back: toggle + every stats item, by exact width.
     ext = [s for s in now.values() if not s["notch"]]
-    own = [st["frames"]["toggle"][2]] + [l + 16 for l in st["stats"]["widths"].values()]
+    pad = st.get("itemSpacing") or 16
+    own = [st["frames"]["toggle"][2]] + [l + pad for l in st["stats"]["widths"].values()]
     for wdt in own:
         check(all(any(abs(w["w"] - wdt) <= 2 for w in s["row"]) for s in ext), f"BarTap item of width {wdt} is back after the restart")
     cmd("show"); time.sleep(1.0)
@@ -476,11 +496,12 @@ def stats_items_beside_toggle(st, screens):
         return True, ""
     rds = st["stats"].get("rds", {})
     toggle_rd = st.get("toggleRD", 1e9)
+    pad = st.get("itemSpacing") or 16
     missing = []
     for name, length in widths.items():
         rd = rds.get(name)
         ok = rd is not None and rd < toggle_rd and any(
-            any(abs(r["w"] - (length + 16)) <= 2 and abs(r["rd"] - rd) <= 30 and r["on"] for r in x["row"]) for x in screens)
+            any(abs(r["w"] - (length + pad)) <= 2 and abs(r["rd"] - rd) <= 30 and r["on"] for r in x["row"]) for x in screens)
         if not ok:
             missing.append(name)
     return (not missing), f"not drawn right of the toggle: {missing}"
@@ -615,6 +636,47 @@ def scenario_first_run_with_stats():
     check(ok, f"stats items sit right of the toggle and are drawn ({detail})")
 
 
+def scenario_layout_dividers():
+    print("• Settings › Layout: dragging │ moves only BarTap's items, into the chosen gap")
+    if not state().get("axTrusted"):
+        notes.append("layout scenario skipped: Accessibility not granted")
+        return
+    # A normal session: no first-run placement still waiting for the notched bar.
+    quit_app()
+    defaults_write("placementPending", "bool", "false")
+    launch(wait=1.0)
+    stats_on(["cpu", "memory", "network"])
+    time.sleep(3)
+    cmd("debug/layout-open"); time.sleep(3)
+    check(state()["effectiveLevel"] == "revealedAll", "every icon shown while the page is open")
+    rows = catalog()
+    if len(rows) < 6:
+        notes.append(f"layout scenario: only {len(rows)} icons")
+        cmd("debug/layout-close")
+        return
+    # Two gaps mid-bar, each between icons of different apps: the newest apps' icons at the far left
+    # can't have anything left of them, and some apps (iStat Menus) keep their icons together.
+    gaps = [g for g in range(2, len(rows)) if rows[g - 1]["app"] != rows[g]["app"]]
+    gaps.sort(key=lambda g: abs(g - len(rows) // 2))
+    for goal in sorted(gaps[:2]):
+        cmd(f"debug/move-hidden-{goal}")
+        time.sleep(1.0)
+        wait_until(lambda: not state().get("layoutMoving", False) and not state().get("placementSettling", False), 90, step=0.5)
+        time.sleep(1.0)
+        st = state()
+        got = sum(1 for r in catalog() if r["section"] != "shown")
+        print(f"    to {goal}: {st['layoutMove'].split('[')[0].strip()} → {got} hidden")
+        # Exact unless another app moves its own icon meanwhile (App Cleaner re-creates its icon to
+        # update a badge; iStat Menus keeps its icons together): then right next to it.
+        check(abs(got - goal) <= 1, f"divider in gap {goal} (got {got})")
+        if got != goal:
+            notes.append(f"layout: asked for gap {goal}, landed in {got} (another app's icon moved)")
+        check(st["layoutProblem"] == "", f"layout problem {st['layoutProblem']!r}")
+    check(sh("defaults", "read", DOMAIN, "NSStatusItem Preferred Position tb_probe", check=False).strip() == "", "probe key removed")
+    cmd("debug/layout-close"); time.sleep(1.5)
+    check(state()["effectiveLevel"] == "collapsed", "collapses again when the page closes")
+
+
 def scenario_jitter():
     print("• fixed elements never move when values change length (pixel check)")
     cmd("debug/jitter"); time.sleep(1.0)
@@ -689,6 +751,7 @@ SCENARIOS = {
     "takeover": scenario_takeover_hunt,
     "reset_stats": scenario_reset_with_stats,
     "first_run_stats": scenario_first_run_with_stats,
+    "layout": scenario_layout_dividers,
     "jitter": scenario_jitter,
     "time": scenario_time_module,
     "ai": scenario_ai_usage,

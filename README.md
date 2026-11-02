@@ -36,6 +36,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - Hide icons behind the toggle. An optional ‖ section keeps some hidden for good.
 - Reveal them with a click, hover, scroll or hotkey (⌃⌥⌘B). They re-hide on their own.
 - On a notched Mac, a click can open the shelf: a Bartender-style dropdown with the hidden icons, real images included. Click one to open its menu.
+- See your whole menu bar in **Settings › Layout**, real icons in their real order, and drag │ to choose which are hidden.
 - Search any menu bar icon (⌃⌥⌘F).
 - Rules reveal icons on a large display, in chosen apps, on low battery or when you're offline.
 - Clean menu bar for screenshots, tighter icon spacing, Keep Awake and a color picker.
@@ -50,7 +51,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - Tokens and cost of Claude Code, Codex, Gemini CLI, OpenCode, Kilo Code, Qwen Code and Kimi Code, read from their logs on your Mac. No API keys, no sign-in, nothing uploaded.
 - Today, this week, month, quarter or year, for all agents, a few or one. Show their total, or each agent side by side.
 - Cost is what the tokens would cost at API prices (LiteLLM's public price list), so a subscription shows what its usage is worth.
-- Plan limits as Claude Code and Codex report them: 5-hour and weekly, used or left, with reset times.
+- Plan limits as Claude Code and Codex report them: 5-hour and weekly, used or left, with reset times. Claude's usage credits too: how much of your monthly limit is spent.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/layouts-dark.webp">
@@ -68,7 +69,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 2. BarTap is self-signed, not notarized. If macOS blocks the first launch, open **System Settings › Privacy & Security** and click **Open Anyway**. You only do this once.
 3. Hold ⌘ and drag icons left of the │ divider to hide them. Turn on stats and AI usage in **Settings › Stats**.
 
-Hiding and AI usage need no permission. Two optional ones: **Accessibility** enables the shelf, search and the layout list, and **Screen Recording** shows real icons in the shelf. Both stay granted when you update. Quit any other menu bar manager first.
+Hiding and AI usage need no permission. Two optional ones: **Accessibility** enables the shelf, search and Settings › Layout, and **Screen Recording** shows real icons there. Both stay granted when you update. Quit any other menu bar manager first.
 
 ## Why it can't twitch
 

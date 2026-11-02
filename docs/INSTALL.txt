@@ -10,8 +10,9 @@ BarTap 安装说明 / Install
 3. 菜单栏右侧会出现 BarTap 开关（BarTap 标志）。按住 ⌘ 把图标拖到 │ 分隔线左边即可隐藏；
    点按开关（或 ⌃⌥⌘B）显示/隐藏。
 4. 可选：在「系统设置 › 隐私与安全性 › 辅助功能」中允许 BarTap，即可使用图标架
-   （点开关弹出隐藏图标的下拉栏，刘海屏很有用）、图标搜索（⌃⌥⌘F）和布局列表；再允许「录屏」，
-   图标架会显示真实图标。隐藏功能本身不需要任何权限，升级后授权也会保留。
+   （点开关弹出隐藏图标的下拉栏，刘海屏很有用）、图标搜索（⌃⌥⌘F）和「设置 › 布局」
+   （拖动 │ 选择隐藏哪些图标）；再允许「录屏」，这些地方会显示真实图标。
+   隐藏功能本身不需要任何权限，升级后授权也会保留。
 5. 如果你在用 Bartender / Ice / Hidden Bar，请先退出它们，避免两个工具抢同一批图标。
 6. 系统监控（CPU、GPU、内存、磁盘、网络、传感器、电池、时间）和 AI 用量（Claude Code、Codex 等的
    token、费用和套餐额度）都在「设置 › 系统监控」里打开。AI 用量只读本机日志，不要密钥，不用登录。
@@ -29,8 +30,9 @@ BarTap 从不发送模拟鼠标/键盘事件，从不移动指针，也不拦截
    (the BarTap mark) or press ⌃⌥⌘B to show/hide them.
 4. Optional: allow BarTap under Privacy & Security › Accessibility to enable the
    shelf, a dropdown of hidden icons (handy beside the notch), icon search (⌃⌥⌘F)
-   and the layout list; allow Screen Recording too for real icons in the shelf.
-   Hiding itself needs no permission, and grants survive updates.
+   and Settings › Layout (drag │ to choose which icons are hidden); allow Screen
+   Recording too for real icons there. Hiding itself needs no permission, and
+   grants survive updates.
 5. Quit other menu bar managers (Bartender, Ice, Hidden Bar) first.
 6. Turn on system stats (CPU, GPU, memory, disk, network, sensors, battery, time)
    and AI usage (tokens, cost and plan limits of Claude Code, Codex and others) in

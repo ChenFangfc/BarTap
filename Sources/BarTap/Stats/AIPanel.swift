@@ -104,7 +104,7 @@ final class AIPanel: StatsPanel {
         }
 
         planTitle = section(L("Plan limits · used"))
-        planRows = dynamicRows(6, prefix: "plan")
+        planRows = dynamicRows(8, prefix: "plan")
 
         section(L("Top models this month"))
         modelRows = dynamicRows(4, prefix: "model")
@@ -133,6 +133,16 @@ final class AIPanel: StatsPanel {
         case .quarter: return L("This quarter")
         case .year: return L("This year")
         }
+    }
+
+    /// "$2,186 / $9,000 · 24%" (used), "$6,814 / $9,000 · 76%" (left), or "limit reached".
+    static func creditsText(_ s: AISpend, left: Bool) -> String {
+        guard let limit = s.limit, let amount = s.amount(left: left), let fraction = s.fraction(left: left) else {
+            return AIFormat.money(s.used, currency: s.currency)
+        }
+        if s.limitReached { return L("limit reached") + " · " + AIFormat.money(limit, currency: s.currency) }
+        return AIFormat.money(amount, currency: s.currency) + " / " + AIFormat.money(limit, currency: s.currency)
+            + " · \(Int((fraction * 100).rounded()))%"
     }
 
     /// Dates in the app's language, like the rest of the dropdown.
@@ -186,11 +196,15 @@ final class AIPanel: StatsPanel {
         var plans: [(String, String)] = []
         for a in AIAgent.allCases {
             guard let p = detail.plans[a] else { continue }
-            for w in p.windows.sorted(by: { $0.minutes < $1.minutes }) where (w.resetsAt ?? .distantFuture) > now {
+            for w in p.current(now: now).sorted(by: { $0.minutes < $1.minutes }) {
                 let label = "\(a.planName) \(w.scope.map { $0 + " " } ?? "")\(w.shortName)"
                 plans.append((label, "\(Int(w.percent(left: left).rounded()))%" + reset(w.resetsAt)))
             }
-            if let c = p.credits { plans.append(("\(a.planName) " + L("credits"), String(format: "%.2f", c))) }
+            if let s = p.spend {
+                plans.append(("\(a.planName) " + L("usage credits"), Self.creditsText(s, left: left)))
+            } else if let c = p.credits {
+                plans.append(("\(a.planName) " + L("credits"), String(format: "%.2f", c)))
+            }
         }
         for (i, (name, value)) in planRows.enumerated() {
             name.stringValue = i < plans.count ? plans[i].0 : (i == 0 ? L("No plan limits reported yet") : "")
@@ -211,7 +225,12 @@ final class AIPanel: StatsPanel {
 
         var lines = [L("Costs are what these tokens would cost at API prices (%@), not what a subscription bills.", prices.fetched.isEmpty ? "–" : prices.fetched)]
         if let claude = detail.plans[.claudeCode] {
-            lines.append(L("Claude limits as of %@ (from Claude Code).", Self.timeFormatter.string(from: claude.updated)))
+            // Claude Code refreshes these now and then; say how old they are once it matters.
+            let hours = Int(now.timeIntervalSince(claude.updated) / 3600)
+            let when = Calendar.current.isDate(claude.updated, inSameDayAs: now)
+                ? Self.timeFormatter.string(from: claude.updated) : Self.dayFormatter.string(from: claude.updated) + " " + Self.timeFormatter.string(from: claude.updated)
+            lines.append(hours >= 1 ? L("Claude limits as of %@, %d h ago (from Claude Code).", when, hours)
+                                    : L("Claude limits as of %@ (from Claude Code).", when))
         }
         if let p = detail.progress { lines.append(L("Reading history… %d%%", Int(p * 100))) }
         if main.unpricedTokens > 0 { lines.append(L("+ means some models have no known price.")) }
