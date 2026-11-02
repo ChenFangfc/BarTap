@@ -404,15 +404,24 @@ func drawMapped(_ image: CGImage, _ q: [CGPoint], alpha: Double) {
 
 /// The laptop, its lid open by `open` (1 open at 108°, 0 shut).
 func drawLaptop(open: Double, t: Double, alpha: Double) {
-    guard alpha > 0.001 else { return }
+    guard alpha > 0.001, let gc = NSGraphicsContext.current?.cgContext else { return }
+    // Drawn opaque and faded as one piece: faded face by face, the shut lid would let the keyboard
+    // show through it.
+    gc.saveGState()
+    gc.setAlpha(CGFloat(alpha))
+    gc.beginTransparencyLayer(auxiliaryInfo: nil)
+    defer {
+        gc.endTransparencyLayer()
+        gc.restoreGState()
+    }
     let cam = laptopCam
     let a: CGFloat = 330, b: CGFloat = 225, tb: CGFloat = 14, L: CGFloat = 446, tl: CGFloat = 8
-    let A = CGFloat(alpha)
+    let A: CGFloat = 1
     func c(_ w: CGFloat) -> NSColor { NSColor(srgbRed: w, green: w, blue: w + 0.02, alpha: A) }
     // Base: the deck (keyboard, trackpad), its front and right side; the shadow grounds it.
     let deck = [V3(x: -a, y: 0, z: -b), V3(x: a, y: 0, z: -b), V3(x: a, y: 0, z: b), V3(x: -a, y: 0, z: b)].map(cam.p)
     NSGraphicsContext.saveGraphicsState()
-    softShadow(alpha, blur: 46, dy: -26, strength: 0.22)
+    softShadow(1, blur: 46, dy: -26, strength: 0.22)
     fillQuad([V3(x: -a, y: -tb, z: -b), V3(x: a, y: -tb, z: -b), V3(x: a, y: -tb, z: b), V3(x: -a, y: -tb, z: b)].map(cam.p), c(0.70))
     NSGraphicsContext.restoreGraphicsState()
     fillQuad([V3(x: a, y: 0, z: -b), V3(x: a, y: 0, z: b), V3(x: a, y: -tb, z: b), V3(x: a, y: -tb, z: -b)].map(cam.p), c(0.66))
@@ -434,7 +443,7 @@ func drawLaptop(open: Double, t: Double, alpha: Double) {
     if cam.sees(lid(0, L / 2), nIn) {
         fillQuad([lid(-a, L), lid(a, L), lid(a, 0), lid(-a, 0)].map(cam.p), c(0.12))   // bezel
         let quad = [lid(-a + 18, L - 18), lid(a - 18, L - 18), lid(a - 18, 16), lid(-a + 18, 16)].map(cam.p)
-        if let img = screenImage(t: t, width: 1248, height: 824) { drawMapped(img, quad, alpha: alpha) }
+        if let img = screenImage(t: t, width: 1248, height: 824) { drawMapped(img, quad, alpha: 1) }
     } else {
         fillQuad([lid(-a, L, true), lid(a, L, true), lid(a, 0, true), lid(-a, 0, true)].map(cam.p), c(0.84))   // its back
     }
