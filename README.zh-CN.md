@@ -15,7 +15,7 @@
 
 <br>
 
-<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><img src="docs/media/bartap-preview-zh.webp" width="100%" alt="37 秒看懂 BarTap：塞满的菜单栏、一条分隔线收起图标、实时系统监控和 AI 用量"></a>
+<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><img src="docs/media/bartap-preview-zh.webp" width="100%" alt="37 秒看懂 BarTap：塞满的菜单栏、一条分隔线收起图标、实时系统监控和 AI 用量、合盖不睡眠、视频下载"></a>
 
 <sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 带声音观看（0:37）</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ English</b></a></sub>
 

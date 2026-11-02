@@ -15,7 +15,7 @@
 
 <br>
 
-<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><img src="docs/media/bartap-preview.webp" width="100%" alt="BarTap in 37 seconds: a crowded menu bar, icons tucked behind one divider, live system stats and AI usage"></a>
+<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><img src="docs/media/bartap-preview.webp" width="100%" alt="BarTap in 37 seconds: a crowded menu bar, icons tucked behind one divider, live system stats and AI usage, staying awake with the lid closed, video downloads"></a>
 
 <sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ Watch with sound (0:37)</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 中文版</b></a></sub>
 

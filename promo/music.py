@@ -3,7 +3,7 @@
 
     python3 promo/music.py        # reads promo/out/cues.json, writes promo/out/soundtrack.wav
 
-100 BPM, in C. The film's events all sit on the eighth-note grid, and `film cues` lists them.
+120 BPM (the film's `beat`), in C. The film's events all sit on the eighth-note grid, and `film cues` lists them.
 A rising pluck for every icon that piles into the bar; a detuned, stuttering wobble while the
 bar twitches; then the twitching just stops. A pen-stroke and a bell chord for the mark, then a
 light I-V-vi-IV pulse under the demo with a sound on every tap, pop and click. No samples, no
@@ -302,6 +302,9 @@ def master(mx, kicks, dur):
 
 def main():
     data = json.loads((ROOT / "out" / "cues.json").read_text())
+    global BEAT, EIGHTH
+    BEAT = float(data.get("beat", BEAT))   # the film sets the tempo
+    EIGHTH = BEAT / 2
     dur, sc = float(data["duration"]), data["scenes"]
     mx = Mix(dur)
     kicks = score(mx, sc, dur)

@@ -17,6 +17,11 @@ if [[ ! -f promo/assets/panel_cpu_light.png ]]; then
   swift build --product BarTap >/dev/null
   .build/debug/BarTap --export-promo-assets "$PWD/promo/assets"
 fi
+# BarTap's real download panel, with its sample (an open-source short film).
+if [[ ! -f promo/assets/downloads/downloads_preview_en_light.png ]]; then
+  swift build --product BarTap >/dev/null
+  .build/debug/BarTap --render-downloads "$PWD/promo/assets/downloads" >/dev/null
+fi
 
 # 2. The compositor, its sound cues, and the soundtrack.
 swiftc -O promo/film.swift -o .build/film
