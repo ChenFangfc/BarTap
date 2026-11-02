@@ -138,7 +138,7 @@ enum ItemImages {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             saveScheduled = false
             var rows: [String: [String: Any]] = [:]
-            for (key, image) in cache {
+            for (key, image) in cache where !key.contains("|bartap.stats.") {
                 guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
                       let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { continue }
                 rows[key] = ["png": png, "w": Double(image.size.width), "h": Double(image.size.height), "template": image.isTemplate]

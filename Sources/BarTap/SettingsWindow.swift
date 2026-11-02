@@ -66,6 +66,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             (L("Rules"), "wand.and.stars", SettingsWindowController.buildRules),
             (L("Layout"), "menubar.rectangle", SettingsWindowController.buildLayout),
             (L("Stats"), "chart.xyaxis.line", SettingsWindowController.buildStats),
+            (L("Downloads"), "arrow.down.circle", SettingsWindowController.buildDownloads),
             (L("Power-ups"), "bolt", SettingsWindowController.buildPowerUps),
             (L("About"), "info.circle", SettingsWindowController.buildAbout),
         ]
@@ -470,7 +471,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         f.popup(L("Copy as"), options: [("hex", "#RRGGBB"), ("rgb", "rgb(r, g, b)"), ("swiftui", "SwiftUI Color")],
                 get: { [unowned self] in s.colorFormat }, set: { [unowned self] in s.colorFormat = $0 })
         f.button(L("Pick a Color")) { [weak self] in self?.host?.pickColor() }
+    }
 
+    private func buildDownloads(_ f: Form) {
         VideoDownloadSettings.build(f, settings: s)
     }
 

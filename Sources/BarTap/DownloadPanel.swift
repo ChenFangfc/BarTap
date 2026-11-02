@@ -1377,11 +1377,32 @@ extension DownloadJob {
 
 // MARK: - Settings
 
-/// Settings › Power-ups › Video Downloads: the defaults the panel starts with, and the download
-/// component.
+/// Settings › Downloads: a link field that opens the download panel with it, the defaults the
+/// panel starts with, and the download component.
 enum VideoDownloadSettings {
     static func build(_ f: Form, settings s: Settings) {
-        f.section(L("Video Downloads"))
+        f.section(L("Download a Video"))
+        // Where people look first: paste (⌘V) or drop the link here; Return or the button opens the
+        // panel with it, its qualities already loading.
+        let field = NSTextField()
+        field.placeholderString = L("Paste or drop a video link")
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        let open = ClosureTarget { _ in
+            let link = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            field.stringValue = ""
+            VideoDownloads.shared.showPanel(prefill: link.isEmpty ? nil : link)
+        }
+        f.keep(open)
+        let go = NSButton(title: L("Download Video…"), target: open, action: #selector(ClosureTarget.fire(_:)))
+        go.bezelStyle = .rounded
+        go.keyEquivalent = "\r"   // the default button: Return in the field opens it too
+        let linkRow = NSStackView(views: [field, go])
+        linkRow.spacing = 8
+        f.custom(nil, linkRow)
+        f.note(L("Also in the BarTap button's menu (right-click the button). You can set a shortcut in Hotkeys."))
+
+        f.section(L("Defaults"))
         f.toggle(L("Show Download Video… in the menu"), get: { s.videoDownloadsEnabled }, set: { s.videoDownloadsEnabled = $0 })
 
         let folderLabel = NSTextField(labelWithString: "")

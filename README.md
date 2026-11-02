@@ -54,7 +54,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - World clocks, a calendar, °F and bits. Combine all stats into one item to save space by the notch.
 
 **Video downloads**
-- Paste or drop a link, pick one of the qualities the video really has, the format and where to save, and download. Pause, resume or cancel; open the file when it's done.
+- In Settings › Downloads (or the BarTap button's menu, or a shortcut): paste or drop a link, pick one of the qualities the video really has, the format and where to save, and download. Pause, resume or cancel; open the file when it's done.
 - Options when you need them: subtitles, playlists, a time range, cover and chapters, skipping sponsor segments, signing in through your browser, a speed limit and file names.
 - Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp): BarTap uses yours from Homebrew, or fetches its official release (checksum verified) when you ask. Download only what you have the right to.
 

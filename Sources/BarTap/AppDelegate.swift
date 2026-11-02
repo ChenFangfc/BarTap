@@ -765,6 +765,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         }
         m.addItem(item(L("Search Menu Bar…") + hint(.search)) { [weak self] in self?.openSearch() })
         m.addItem(item(L("Open Shelf") + hint(.shelf)) { [weak self] in self?.openShelf() })
+        if settings.videoDownloadsEnabled {
+            m.addItem(item(VideoDownloads.menuTitle + hint(.downloadVideo)) { VideoDownloads.shared.showPanel() })
+        }
         m.addItem(.separator())
 
         let clean = item(L("Clean Menu Bar") + hint(.clean)) { [weak self] in
@@ -799,7 +802,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         awake.state = keepAwake.isActive ? .on : .off
         m.addItem(awake)
         m.addItem(item(L("Pick a Color…")) { [weak self] in self?.pickColor() })
-        if settings.videoDownloadsEnabled { m.addItem(item(VideoDownloads.menuTitle) { VideoDownloads.shared.showPanel() }) }
 
         if let problem = reveal.layoutProblem, problem != .notReady {
             m.addItem(.separator())
