@@ -140,6 +140,32 @@ test("own run: the drawn copy of the bar, named or not") {
     expect(other?.toggle == shown[1].bounds && other?.hidden == shown[0].bounds, "\(String(describing: other))")
 }
 
+test("lid awake: pmset's state, the watcher script, AppleScript quoting") {
+    let pm = "System-wide power settings:\nCurrently in use:\n standby              1\n SleepDisabled\t\t1\n sleep                0\n"
+    expect(LidAwakeScript.sleepDisabled(fromPMSet: pm) == true)
+    expect(LidAwakeScript.sleepDisabled(fromPMSet: pm.replacingOccurrences(of: "SleepDisabled\t\t1", with: "SleepDisabled\t\t0")) == false)
+    expect(LidAwakeScript.sleepDisabled(fromPMSet: " sleep                0\n") == nil)
+    let stop = "/Users/someone/Library/Application Support/BarTap/lid-awake.stop"
+    guard let c = LidAwakeScript.command(watching: 4321, stopFile: stop, batteryMin: 10) else { expect(false, "no command"); return }
+    expect(c.hasPrefix("\"/usr/bin/pmset\" -a disablesleep 1 || exit 1\n"))
+    expect(c.contains("kill -0 4321 2>/dev/null || break"))
+    expect(c.contains("[ -e \"\(stop)\" ] && break"))
+    expect(c.contains("-le 10 ] && break"))
+    expect(c.contains("\"/usr/bin/pmset\" -a disablesleep 0'"), "sleep comes back as the watcher's last step")
+    expect(c.hasSuffix("echo $!"))
+    // The watcher sits in single quotes, with none inside.
+    expect(c.components(separatedBy: "'").count == 3)
+    // Anything that could break out of the quoting is refused.
+    for bad in ["/tmp/a\"b", "/tmp/a'b", "/tmp/$(x)", "/tmp/a`b`", "/tmp/a\\b", "/tmp/a\nb", ""] {
+        expect(LidAwakeScript.command(watching: 1, stopFile: bad, batteryMin: 10) == nil, bad)
+    }
+    expect(LidAwakeScript.command(watching: 0, stopFile: stop, batteryMin: 10) == nil)
+    // AppleScript literals: quotes, backslashes, line breaks.
+    expect(LidAwakeScript.quoted("a \"b\" \\ c\nd") == "\"a \\\"b\\\" \\\\ c\\nd\"")
+    let s = LidAwakeScript.appleScript(running: "echo \"x\"", prompt: "P")
+    expect(s == "do shell script \"echo \\\"x\\\"\" with prompt \"P\" with administrator privileges", s)
+}
+
 test("overflow count: icons laid out but not drawn") {
     let r = MenuBarGeometry.row(on: builtIn, windows: builtInRow)
     expect(MenuBarGeometry.overflowCount(on: builtIn, row: r, leftOf: 1730) == 6)

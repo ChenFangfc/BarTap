@@ -51,6 +51,136 @@ final class KeepAwake {
     }
 }
 
+/// Stay awake with the lid closed (`pmset -a disablesleep 1`; see `LidAwakeScript`). Turning it on
+/// asks for an administrator password once; turning it off just leaves a file for the watcher.
+final class LidAwake {
+    /// On battery at or below this, sleep comes back on its own.
+    static let batteryMin = 10
+    private static let stopFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("BarTap/lid-awake.stop")
+
+    /// `SleepDisabled` as macOS reports it (also when set some other way, e.g. in Terminal).
+    private(set) var isOn = false
+    var onChange: (() -> Void)?
+    /// The watcher started by this BarTap (running as root, so only its existence can be checked).
+    private var watcher: pid_t?
+    private var poll: Timer?
+    private var turningOff = false
+
+    /// Reads the current state; while it's on, keeps an eye on it (the watcher may turn it off).
+    func refresh(completion: (() -> Void)? = nil) {
+        DispatchQueue.global(qos: .utility).async {
+            let on = Self.readSleepDisabled()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let was = self.isOn
+                if let on { self.isOn = on }
+                if was && !self.isOn && !self.turningOff {
+                    Toast.show(Self.onBatteryAtOrBelowMin() ? L("Battery below %d%%: the Mac sleeps normally again", Self.batteryMin)
+                                                            : L("The Mac sleeps normally again"), symbol: "moon")
+                }
+                if !self.isOn { self.watcher = nil }
+                self.watch()
+                if was != self.isOn { self.onChange?() }
+                completion?()
+            }
+        }
+    }
+
+    func turnOn() {
+        guard !isOn else { return }
+        try? FileManager.default.createDirectory(at: Self.stopFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: Self.stopFile)
+        guard let command = LidAwakeScript.command(watching: getpid(), stopFile: Self.stopFile.path, batteryMin: Self.batteryMin) else {
+            Toast.show(L("Couldn't turn it on: %@", L("unusual folder name")), symbol: "exclamationmark.triangle")
+            return
+        }
+        // macOS's own password dialog; it blocks this thread until answered, as any app's would.
+        guard let out = Self.runAsAdministrator(command) else { refresh(); return }
+        watcher = pid_t(out.trimmingCharacters(in: .whitespacesAndNewlines))
+        refresh { [weak self] in
+            if self?.isOn == true { Toast.show(L("Lid closed, the Mac stays awake"), symbol: "laptopcomputer") }
+        }
+    }
+
+    func turnOff() {
+        guard isOn else { return }
+        turningOff = true
+        if let w = watcher, kill(w, 0) == 0 || errno == EPERM {
+            // The watcher (ours, running as root) puts sleep back within 2 s: no password.
+            FileManager.default.createFile(atPath: Self.stopFile.path, contents: nil)
+            confirmOff(tries: 12)
+        } else {
+            // Turned on some other way (Terminal, or before a restart): needs the password again.
+            _ = Self.runAsAdministrator(LidAwakeScript.restoreCommand())
+            confirmOff(tries: 4)
+        }
+    }
+
+    private func confirmOff(tries: Int) {
+        refresh { [weak self] in
+            guard let self else { return }
+            if self.isOn, tries > 1 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.confirmOff(tries: tries - 1) }
+                return
+            }
+            self.turningOff = false
+            try? FileManager.default.removeItem(at: Self.stopFile)
+            if !self.isOn { Toast.show(L("The Mac sleeps normally again"), symbol: "moon") }
+        }
+    }
+
+    private func watch() {
+        if isOn, poll == nil {
+            let t = Timer(timeInterval: 15, repeats: true) { [weak self] _ in self?.refresh() }
+            t.tolerance = 3
+            RunLoop.main.add(t, forMode: .common)
+            poll = t
+        } else if !isOn {
+            poll?.invalidate()
+            poll = nil
+        }
+    }
+
+    /// Runs `shell` as an administrator; nil if the user cancelled or it failed.
+    private static func runAsAdministrator(_ shell: String) -> String? {
+        let source = LidAwakeScript.appleScript(running: shell,
+                                                prompt: L("BarTap needs an administrator to keep the Mac awake with the lid closed."))
+        var error: NSDictionary?
+        guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error), error == nil else {
+            if let code = error?[NSAppleScript.errorNumber] as? Int, code != -128 {   // -128: cancelled
+                Toast.show(L("Couldn't turn it on: %@", (error?[NSAppleScript.errorMessage] as? String) ?? "\(code)"),
+                           symbol: "exclamationmark.triangle")
+            }
+            return nil
+        }
+        return result.stringValue ?? ""
+    }
+
+    private static func readSleepDisabled() -> Bool? {
+        run("/usr/bin/pmset", ["-g"]).flatMap(LidAwakeScript.sleepDisabled(fromPMSet:))
+    }
+
+    private static func onBatteryAtOrBelowMin() -> Bool {
+        guard let out = run("/usr/bin/pmset", ["-g", "batt"]), out.contains("Battery Power"),
+              let pct = out.split(separator: "\t").dropFirst().first?.split(separator: "%").first.flatMap({ Int($0) }) else { return false }
+        return pct <= batteryMin
+    }
+
+    private static func run(_ path: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+}
+
 /// System colour sampler (the magnifier loupe); copies the picked colour to the clipboard.
 enum ColorPicker {
     static func pick(format: String) {

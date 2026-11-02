@@ -42,6 +42,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - Search any menu bar icon (⌃⌥⌘F).
 - Rules reveal icons on a large display, in chosen apps, on low battery or when you're offline.
 - Clean menu bar for screenshots, tighter icon spacing, Keep Awake and a color picker.
+- Stay awake with the lid closed (`pmset -a disablesleep 1`): one administrator password to turn it on, none to turn it off. Sleep comes back by itself when BarTap quits or the battery runs low.
 
 **Monitor**
 - Eleven modules, refreshed every second. Build each item from elements in any order (graph, bar, pie, ring, percentage, U:/F:, R:/W:, ↑↓, label…), or pick a preset. Reorder the items too.
@@ -95,7 +96,7 @@ Hiding in BarTap only changes the length of its own divider items: no input even
 
 ## Light by design
 
-Idle, BarTap uses about **0.02% CPU** and **~40 MB** of memory. Four live stats refreshed every second add **1–3% CPU**, depending on how many displays draw the menu bar (macOS redraws each changed item on every one). Unchanged readouts are never redrawn, and details and process lists are sampled only while a dropdown is open. AI usage reads only the lines an agent adds, a few seconds after it writes them; the first pass over a long history takes seconds (7 GB of logs: about 11 s). There is no daemon and no root helper. The only network requests are the public IP lookup, if you turn it on, a weekly download of the public model price list while AI usage is on (you can turn that off), and the video downloads you start (plus yt-dlp's official release, when you install or update it).
+Idle, BarTap uses about **0.02% CPU** and **~40 MB** of memory. Four live stats refreshed every second add **1–3% CPU**, depending on how many displays draw the menu bar (macOS redraws each changed item on every one). Unchanged readouts are never redrawn, and details and process lists are sampled only while a dropdown is open. AI usage reads only the lines an agent adds, a few seconds after it writes them; the first pass over a long history takes seconds (7 GB of logs: about 11 s). There is no daemon and no root helper. Only while Stay Awake with Lid Closed is on, a small script runs with the administrator rights you granted; it puts sleep back and exits when you turn it off. The only network requests are the public IP lookup, if you turn it on, a weekly download of the public model price list while AI usage is on (you can turn that off), and the video downloads you start (plus yt-dlp's official release, when you install or update it).
 
 <sub>Measured on a MacBook Pro (M2 Max) running macOS 26.</sub>
 

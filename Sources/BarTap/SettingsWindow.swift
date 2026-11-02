@@ -11,6 +11,7 @@ protocol SettingsHost: AnyObject {
     var settings: Settings { get }
     var hotkeyFailures: Set<HotkeyAction> { get }
     var keepAwake: KeepAwake { get }
+    var lidAwake: LidAwake { get }
     func applyHotkeys()
     func setHotkeysSuspended(_ on: Bool)
     func resetPositions()
@@ -466,6 +467,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         } + [(L("Turn Off"), { [weak self] in self?.host?.keepAwake.stop(); self?.forms.forEach { $0.refresh() } })])
         f.toggle(L("Let the display sleep (keep only the Mac awake)"),
                  get: { [unowned self] in s.keepAwakeAllowDisplaySleep }, set: { [unowned self] in s.keepAwakeAllowDisplaySleep = $0 })
+
+        f.section(L("Stay Awake with Lid Closed"))
+        f.note("") { [weak self] in
+            self?.host?.lidAwake.isOn == true ? L("On: the Mac stays awake with the lid closed.") : L("Off: the Mac sleeps when the lid closes.")
+        }
+        f.buttons([
+            (L("Turn On"), { [weak self] in self?.host?.lidAwake.turnOn() }),
+            (L("Turn Off"), { [weak self] in self?.host?.lidAwake.turnOff() }),
+        ])
+        f.note(String(format: L("Turning it on asks for an administrator password (it runs pmset -a disablesleep 1); turning it off doesn't. Sleep also comes back by itself when BarTap quits, or on battery at %d%% or below. Don't put the Mac in a bag while it's on."), LidAwake.batteryMin))
 
         f.section(L("Color Picker"))
         f.popup(L("Copy as"), options: [("hex", "#RRGGBB"), ("rgb", "rgb(r, g, b)"), ("swiftui", "SwiftUI Color")],

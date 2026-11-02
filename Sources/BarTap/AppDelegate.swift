@@ -4,6 +4,9 @@ import BarTapCore
 final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     let settings = Settings()
     let keepAwake = KeepAwake()
+    let lidAwake = LidAwake()
+    /// Debug: the result of running `do shell script` in this process.
+    var osaxTest = ""
     private(set) var hotkeyFailures: Set<HotkeyAction> = []
 
     private var bar: StatusBarController!
@@ -80,6 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             (self?.searchPanel?.isVisible ?? false) || (self?.shelfPanel?.isVisible ?? false) || !(self?.layoutHolds.isEmpty ?? true)
         }
         keepAwake.onChange = { [weak self] in self?.stateChanged() }
+        lidAwake.onChange = { [weak self] in
+            self?.stateChanged()
+            NotificationCenter.default.post(name: .barTapTrustChanged, object: nil)   // Settings shows its state
+        }
+        lidAwake.refresh { [weak self] in
+            if self?.lidAwake.isOn == true {
+                Toast.show(L("Stay Awake with Lid Closed is on. Turn it off from the BarTap menu."), symbol: "laptopcomputer")
+            }
+        }
 
         VideoDownloads.shared.settings = settings
         let firstRun = !settings.didPlaceItems
@@ -801,6 +813,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         awake.submenu = sub
         awake.state = keepAwake.isActive ? .on : .off
         m.addItem(awake)
+        let lid = item(L("Stay Awake with Lid Closed")) { [weak self] in
+            // Once the menu has closed: turning it on shows macOS's password dialog.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.lidAwake.isOn { self.lidAwake.turnOff() } else { self.lidAwake.turnOn() }
+            }
+        }
+        lid.state = lidAwake.isOn ? .on : .off
+        m.addItem(lid)
         m.addItem(item(L("Pick a Color…")) { [weak self] in self?.pickColor() })
 
         if let problem = reveal.layoutProblem, problem != .notReady {
@@ -1004,6 +1025,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "toggleRD": f.toggle.width > 0 ? Double(-f.toggle.maxX) : -1,
             "lengths": ["hidden": Double(bar.hiddenItem?.length ?? -1), "always": Double(bar.alwaysItem?.length ?? -1)],
             "keepAwake": keepAwake.isActive,
+            "lidAwake": lidAwake.isOn,
+            "osaxTest": osaxTest,
             "hotkeyFailures": hotkeyFailures.map(\.rawValue),
             "busy": reveal.currentBusyReason()?.rawValue ?? "",
             "lastBusy": reveal.lastBusyReason?.rawValue ?? "",
@@ -1250,6 +1273,11 @@ enum Debug {
             app.debugToggleClick()
         case "slim-on", "slim-off":
             app.stats?.slim = what == "slim-on"
+        case "osax-test":
+            var error: NSDictionary?
+            app.osaxTest = NSAppleScript(source: "do shell script \"echo ok\"")?.executeAndReturnError(&error).stringValue ?? "error \(String(describing: error))"
+        case "lid-refresh":
+            app.lidAwake.refresh()
         case "own-windows":
             // BarTap's in-process window numbers next to the window server's status windows (debug).
             let own = app.debugOwnWindowNumbers()
