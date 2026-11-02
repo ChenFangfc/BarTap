@@ -260,6 +260,8 @@ final class ShelfPanel: FloatingPanel {
                 b.tag = i
                 b.isBordered = false
                 b.imageScaling = .scaleProportionallyDown
+                // Templates in full-strength ink, as the menu bar draws them (not a toolbar's grey).
+                b.contentTintColor = .labelColor
                 b.toolTip = item.title == item.appName ? item.title : "\(item.title) — \(item.appName)"
                 b.setAccessibilityLabel(b.toolTip)
                 b.translatesAutoresizingMaskIntoConstraints = false
@@ -291,6 +293,8 @@ final class ShelfPanel: FloatingPanel {
             let scale = min(1, Self.iconHeight / img.size.height)
             let size = NSSize(width: img.size.width * scale, height: img.size.height * scale)
             let sized = NSImage(size: size, flipped: false) { r in img.draw(in: r); return true }
+            // A template takes the shelf's own ink (white on a dark shelf), as in the menu bar.
+            sized.isTemplate = img.isTemplate
             buttons[i].image = sized
             widths[i].constant = max(size.width, 16)
         }

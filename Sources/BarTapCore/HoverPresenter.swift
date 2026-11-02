@@ -215,8 +215,9 @@ public enum StatusItemHitTest {
         let row = MenuBarGeometry.row(on: screen, windows: windows)
         guard let w = row.first(where: { $0.isOnScreen && $0.bounds.minX <= p.x && p.x < $0.bounds.maxX }) else { return nil }
         func hit(_ id: String) -> Hit { Hit(id: id, frame: w.bounds, screenID: screen.id) }
-        if let name = w.name, !name.isEmpty {
-            return items.first { $0.windowName == name }.map { hit($0.id) }
+        // A second copy of the bar (see MenuBarGeometry.row) names its windows otherwise: by slot below.
+        if let name = w.name, !name.isEmpty, let item = items.first(where: { $0.windowName == name }) {
+            return hit(item.id)
         }
         let awake = screens.filter { !$0.asleep }
         func display(of r: CGRect) -> ScreenInfo? { awake.first { $0.frame.contains(CGPoint(x: r.midX, y: r.midY)) } }

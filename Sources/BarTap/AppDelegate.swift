@@ -698,7 +698,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             panel.present(items: listed, trusted: AXCatalog.isTrusted, on: screen, anchorX: anchorX,
                           appearance: self?.bar.toggleItem?.button?.effectiveAppearance)
             self?.configureGestures()
-            ItemImages.capture(listed) { images in if panel.isVisible { panel.updateImages(images) } }
+            // BarTap's own stats items as BarTap draws them (a hidden one is drawn nowhere to capture);
+            // the others as last captured, then as drawn right now.
+            let own = { [weak self] () -> [String: NSImage] in
+                var out: [String: NSImage] = [:]
+                for item in listed {
+                    if let id = item.identifier, id.hasPrefix("bartap.stats."), let img = self?.statsItemImage(id) { out[item.slotKey] = img }
+                }
+                return out
+            }
+            panel.updateImages(ItemImages.cache.merging(own()) { $1 })
+            ItemImages.capture(listed) { images in if panel.isVisible { panel.updateImages(images.merging(own()) { $1 }) } }
         }
         if AXCatalog.isTrusted { catalog.snapshot(completion: show) } else { show([]) }
     }
@@ -1097,9 +1107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     /// Renders the shelf's current content to PNG (debug).
     func debugRenderShelf() {
         guard let panel = shelfPanel, panel.isVisible, let content = panel.contentView else { return }
-        let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)
-        if let rep { content.cacheDisplay(in: content.bounds, to: rep) }
-        DebugRender.write(rep, "shelf")
+        // As shown, then in both appearances (the shelf follows the menu bar's).
+        let shown = panel.appearance
+        for (name, look) in [("shelf", shown), ("shelf_light", NSAppearance(named: .aqua)), ("shelf_dark", NSAppearance(named: .darkAqua))] {
+            panel.appearance = look
+            content.display()
+            let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds)
+            if let rep { content.cacheDisplay(in: content.bounds, to: rep) }
+            DebugRender.write(rep, name)
+        }
+        panel.appearance = shown
     }
 
     /// Renders each settings pane to PNG (debug).

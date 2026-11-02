@@ -531,8 +531,9 @@ final class LayoutPaneModel {
     /// the notch (a capture needs the icon on screen).
     private func withOwnImages(_ images: [String: NSImage], items: [BarItem]) -> [String: NSImage] {
         guard let host else { return images }
-        var out = images
         let dark = host.menuBarIsDark
+        // Captured icons without colour come back as templates (see ItemImages): the bar's ink too.
+        var out = images.mapValues { Self.barTinted($0, dark: dark) }
         for item in items {
             guard let id = item.identifier, id.hasPrefix("bartap.stats."), let img = host.statsItemImage(id) else { continue }
             out[item.slotKey] = Self.barTinted(img, dark: dark)

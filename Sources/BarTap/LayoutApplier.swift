@@ -129,9 +129,11 @@ final class LayoutApplier {
         let wanted = (request.alwaysSection ? tokens(a.always) + ["‖"] + tokens(a.hidden) : tokens(a.always) + tokens(a.hidden))
             + ["│"] + tokens(a.shown) + pinned
         var names: [String: String] = [:]
-        for item in items { if let id = best.ids[item.slotKey] { names["w\(id)"] = item.appName } }
+        // BarTap's own items by what they show ("AI Usage"), not as "BarTap" each.
+        func label(_ item: BarItem) -> String { item.identifier?.hasPrefix("bartap.stats.") == true && !item.title.isEmpty ? item.title : item.appName }
+        for item in items { if let id = best.ids[item.slotKey] { names["w\(id)"] = label(item) } }
         let moved = (a.always + a.hidden + a.shown).filter { request.touched.contains($0) && best.ids[$0] == nil }
-        let byKey = Dictionary(items.map { ($0.slotKey, $0.appName) }, uniquingKeysWith: { first, _ in first })
+        let byKey = Dictionary(items.map { ($0.slotKey, label($0)) }, uniquingKeysWith: { first, _ in first })
         let unplaced = (a.always + a.hidden + a.shown + a.pinned).filter { byKey[$0] != nil && best.ids[$0] == nil }
         return Plan(screen: best.screen, wanted: wanted, anchors: Set(["‖", "│"] + pinned), alwaysSection: request.alwaysSection,
                     names: names, notDrawn: moved.compactMap { byKey[$0] }, unplaced: unplaced.compactMap { byKey[$0] })

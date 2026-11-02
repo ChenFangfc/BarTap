@@ -74,14 +74,24 @@ public enum MenuBarGeometry {
                 && abs($0.bounds.minY - screen.frame.minY) <= 1
                 && $0.bounds.height > 0
                 && $0.bounds.height <= max(screen.menuBarHeight, 22) + 8
-        }.sorted { $0.bounds.maxX > $1.bounds.maxX }
-        guard let first = candidates.first(where: { abs($0.bounds.maxX - screen.frame.maxX) <= 6 }) else { return [] }
+        }
+        // macOS 26 can keep a second copy of every status window on a display (seen with apps in
+        // full screen): the copy not drawn sits within a point of the one that is. Walk one copy:
+        // of the windows that continue the row, the one on screen, else the one lining up best.
+        func best(_ options: [WindowInfo], at edge: CGFloat) -> WindowInfo? {
+            options.min { a, b in
+                a.isOnScreen != b.isOnScreen ? a.isOnScreen : abs(a.bounds.maxX - edge) < abs(b.bounds.maxX - edge)
+            }
+        }
+        guard let first = best(candidates.filter { abs($0.bounds.maxX - screen.frame.maxX) <= 6 }, at: screen.frame.maxX) else { return [] }
         var result = [first]
+        var used: Set<UInt32> = [first.id]
         var edge = first.bounds.minX
-        for w in candidates where w.bounds.maxX < first.bounds.maxX - 0.5 {
-            if w.bounds.width >= separatorWidthThreshold { break }
-            if abs(w.bounds.maxX - edge) > 2.5 { break }
+        while let w = best(candidates.filter {
+            !used.contains($0.id) && abs($0.bounds.maxX - edge) <= 2.5 && $0.bounds.maxX < first.bounds.maxX - 0.5
+        }, at: edge), w.bounds.width < separatorWidthThreshold {
             result.append(w)
+            used.insert(w.id)
             edge = w.bounds.minX
         }
         return result.reversed()
@@ -194,7 +204,12 @@ public struct OwnRun: Equatable {
         // The window server names a status item's window after its autosave name, on the display
         // that hosts it (window names need Screen Recording): exact, wherever the items sit, unless
         // that display is asleep (its positions are then stale).
-        if !screen.asleep, let t = bar.first(where: { $0.name == "tb_toggle" }), let h = bar.first(where: { $0.name == "tb_hidden" }) {
+        // A second copy of the bar may be the one drawn (see MenuBarGeometry.row): its windows
+        // carry no such names, so it is read by widths below.
+        if !screen.asleep, let t = bar.first(where: { $0.name == "tb_toggle" }), let h = bar.first(where: { $0.name == "tb_hidden" }),
+           t.isOnScreen || !row.contains(where: {
+               $0.isOnScreen && $0.id != t.id && same($0.bounds.width, t.bounds.width) && abs($0.bounds.minX - t.bounds.minX) <= 2.5
+           }) {
             return Located(screen: screen, toggle: t.bounds, hidden: h.bounds, always: bar.first(where: { $0.name == "tb_always" })?.bounds)
         }
         // Elsewhere by widths: │ (open, in the row; or collapsed, the long window the row stopped

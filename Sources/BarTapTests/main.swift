@@ -91,6 +91,55 @@ test("row: other displays' windows and non-status layers are ignored") {
     expect(MenuBarGeometry.row(on: portrait, windows: portraitRow).count == 17)
 }
 
+/// A second copy of every status window, as macOS 26 keeps with apps in full screen (measured on the
+/// notched display): made later, never drawn there, 1 pt further left except Control Center's
+/// and the clock, which sit exactly on the first copy.
+func twins(of row: [WindowInfo], drawn: Bool = false) -> [WindowInfo] {
+    row.enumerated().map { i, w in
+        statusWindow(w.bounds.minX - (i >= row.count - 2 ? 0 : 1), w.bounds.width, on: builtIn, drawn: drawn && w.isOnScreen)
+    }
+}
+
+test("row: a second, undrawn copy of the bar is skipped, in any order") {
+    let bar = row(on: builtIn, rightEdge: 1730)
+    for windows in [twins(of: bar) + bar, bar + twins(of: bar)] {
+        let r = MenuBarGeometry.row(on: builtIn, windows: windows)
+        expect(r.map(\.id) == bar.map(\.id), "\(r.map(\.id)) vs \(bar.map(\.id))")
+    }
+    // The copy drawn instead (a full-screen app's bar): the row is that copy.
+    let other = twins(of: bar, drawn: true)
+    let undrawn = bar.map { w -> WindowInfo in var w = w; w.isOnScreen = false; return w }
+    expect(MenuBarGeometry.row(on: builtIn, windows: undrawn + other).map(\.id) == other.map(\.id))
+    // Icons behind the notch are still counted once.
+    let notched = MenuBarGeometry.row(on: builtIn, windows: builtInRow + twins(of: builtInRow))
+    expect(notched.count == 17 && MenuBarGeometry.overflowCount(on: builtIn, row: notched, leftOf: 1730) == 6, "\(notched.count)")
+    // Collapsed: the walk still stops at the long divider of either copy.
+    var collapsed = bar
+    collapsed[5] = statusWindow(bar[5].bounds.maxX - 5010, 5010, on: builtIn, drawn: false)
+    let c = MenuBarGeometry.row(on: builtIn, windows: twins(of: collapsed) + collapsed)
+    expect(c.count == 11 && c.allSatisfy(\.isOnScreen), "\(c.count)")
+}
+
+test("own run: the drawn copy of the bar, named or not") {
+    // Right to left: clock, Control Center, Battery, Wi-Fi, stats (63, 67, 60, 47, 94), toggle, │.
+    let widths: [CGFloat] = [135, 42, 70, 38, 63, 67, 60, 47, 94, 21, 18]
+    var x: CGFloat = 1730
+    var bar: [WindowInfo] = []
+    for w in widths { x -= w; bar.append(statusWindow(x, w, on: builtIn)) }
+    bar.reverse()   // left to right: │, toggle, …
+    bar[0].name = "tb_hidden"
+    bar[1].name = "tb_toggle"
+    let run = OwnRun(hidden: 18, toggle: 21, stats: [94, 47, 60, 67, 63], always: nil)
+    let copy = twins(of: bar)
+    let named = run.locate(on: builtIn, windows: copy + bar)
+    expect(named?.toggle == bar[1].bounds && named?.hidden == bar[0].bounds, "\(String(describing: named))")
+    // In a full-screen app's bar the copy is drawn and the named windows aren't: the copy's.
+    let shown = twins(of: bar, drawn: true)
+    let undrawn = bar.map { w -> WindowInfo in var w = w; w.isOnScreen = false; return w }
+    let other = run.locate(on: builtIn, windows: undrawn + shown)
+    expect(other?.toggle == shown[1].bounds && other?.hidden == shown[0].bounds, "\(String(describing: other))")
+}
+
 test("overflow count: icons laid out but not drawn") {
     let r = MenuBarGeometry.row(on: builtIn, windows: builtInRow)
     expect(MenuBarGeometry.overflowCount(on: builtIn, row: r, leftOf: 1730) == 6)
