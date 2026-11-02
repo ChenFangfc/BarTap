@@ -67,6 +67,12 @@ final class LidAwake {
     private var poll: Timer?
     private var turningOff = false
 
+    /// Debug renders only: shows a state without touching the system.
+    func debugPretend(_ on: Bool) {
+        isOn = on
+        onChange?()
+    }
+
     /// Reads the current state; while it's on, keeps an eye on it (the watcher may turn it off).
     func refresh(completion: (() -> Void)? = nil) {
         DispatchQueue.global(qos: .utility).async {

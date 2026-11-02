@@ -469,19 +469,74 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                  get: { [unowned self] in s.keepAwakeAllowDisplaySleep }, set: { [unowned self] in s.keepAwakeAllowDisplaySleep = $0 })
 
         f.section(L("Stay Awake with Lid Closed"))
-        f.note("") { [weak self] in
-            self?.host?.lidAwake.isOn == true ? L("On: the Mac stays awake with the lid closed.") : L("Off: the Mac sleeps when the lid closes.")
-        }
-        f.buttons([
-            (L("Turn On"), { [weak self] in self?.host?.lidAwake.turnOn() }),
-            (L("Turn Off"), { [weak self] in self?.host?.lidAwake.turnOff() }),
-        ])
+        f.custom(nil, lidAwakeCard(f))
         f.note(String(format: L("Turning it on asks for an administrator password (it runs pmset -a disablesleep 1); turning it off doesn't. Sleep also comes back by itself when BarTap quits, or on battery at %d%% or below. Don't put the Mac in a bag while it's on."), LidAwake.batteryMin))
 
         f.section(L("Color Picker"))
         f.popup(L("Copy as"), options: [("hex", "#RRGGBB"), ("rgb", "rgb(r, g, b)"), ("swiftui", "SwiftUI Color")],
                 get: { [unowned self] in s.colorFormat }, set: { [unowned self] in s.colorFormat = $0 })
         f.button(L("Pick a Color")) { [weak self] in self?.host?.pickColor() }
+    }
+
+    /// What's true now, in words and colour, next to the one button that changes it.
+    private func lidAwakeCard(_ f: Form) -> NSView {
+        let icon = NSImageView()
+        icon.symbolConfiguration = .init(pointSize: 24, weight: .regular)
+        let state = NSTextField(labelWithString: "")
+        state.font = .systemFont(ofSize: 15, weight: .semibold)
+        let detail = NSTextField(labelWithString: "")
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        let texts = NSStackView(views: [state, detail])
+        texts.orientation = .vertical
+        texts.alignment = .leading
+        texts.spacing = 2
+        let flip = ClosureTarget { [weak self] _ in
+            guard let lid = self?.host?.lidAwake else { return }
+            if lid.isOn { lid.turnOff() } else { lid.turnOn() }
+        }
+        f.keep(flip)
+        let button = NSButton(title: "", target: flip, action: #selector(ClosureTarget.fire(_:)))
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [icon, texts, spacer, button])
+        row.spacing = 12
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let card = NSBox()
+        card.boxType = .custom
+        card.titlePosition = .noTitle
+        card.cornerRadius = 10
+        card.borderWidth = 1
+        card.contentViewMargins = .zero
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.widthAnchor.constraint(equalToConstant: 560).isActive = true
+        if let content = card.contentView {
+            content.addSubview(row)
+            NSLayoutConstraint.activate([
+                row.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                row.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                row.topAnchor.constraint(equalTo: content.topAnchor),
+                row.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            ])
+        }
+        let sync = { [weak self] in
+            let on = self?.host?.lidAwake.isOn == true
+            icon.image = NSImage(systemSymbolName: on ? "laptopcomputer" : "moon.zzz", accessibilityDescription: nil)
+            icon.contentTintColor = on ? .systemGreen : .secondaryLabelColor
+            state.stringValue = on ? L("Turned On") : L("Turned Off")
+            state.textColor = on ? .systemGreen : .labelColor
+            detail.stringValue = on ? L("Close the lid and the Mac keeps running.") : L("Close the lid and the Mac sleeps as usual.")
+            button.title = on ? L("Turn Off") : L("Turn On…")
+            card.borderColor = on ? .systemGreen : .separatorColor
+            card.fillColor = on ? NSColor.systemGreen.withAlphaComponent(0.08) : .controlBackgroundColor
+        }
+        f.onRefresh(sync)
+        sync()
+        return card
     }
 
     private func buildDownloads(_ f: Form) {

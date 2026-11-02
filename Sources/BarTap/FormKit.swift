@@ -26,6 +26,8 @@ final class Form {
     }
 
     func refresh() { refreshers.forEach { $0() } }
+    /// For views built outside these helpers.
+    func onRefresh(_ h: @escaping () -> Void) { refreshers.append(h) }
 
     func onAppear(_ h: @escaping () -> Void) { appearHandlers.append(h) }
     func onDisappear(_ h: @escaping () -> Void) { disappearHandlers.append(h) }

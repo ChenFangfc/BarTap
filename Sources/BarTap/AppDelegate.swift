@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     let lidAwake = LidAwake()
     /// Debug: the result of running `do shell script` in this process.
     var osaxTest = ""
+    /// Debug: the BarTap menu's titles, as last built by the "menu" command.
+    var lastMenuTitles: [String] = []
     private(set) var hotkeyFailures: Set<HotkeyAction> = []
 
     private var bar: StatusBarController!
@@ -813,14 +815,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         awake.submenu = sub
         awake.state = keepAwake.isActive ? .on : .off
         m.addItem(awake)
-        let lid = item(L("Stay Awake with Lid Closed")) { [weak self] in
+        // The state in words (and a green dot while it's on), so nobody has to read a checkmark.
+        let lidOn = lidAwake.isOn
+        let lid = item(lidOn ? L("Stay Awake with Lid Closed is on (click to turn off)") : L("Turn On Stay Awake with Lid Closed…")) { [weak self] in
             // Once the menu has closed: turning it on shows macOS's password dialog.
             DispatchQueue.main.async {
                 guard let self else { return }
                 if self.lidAwake.isOn { self.lidAwake.turnOff() } else { self.lidAwake.turnOn() }
             }
         }
-        lid.state = lidAwake.isOn ? .on : .off
+        if lidOn {
+            let title = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: NSColor.systemGreen, .font: NSFont.menuFont(ofSize: 0)])
+            title.append(NSAttributedString(string: lid.title, attributes: [.font: NSFont.menuFont(ofSize: 0)]))
+            lid.attributedTitle = title
+        }
         m.addItem(lid)
         m.addItem(item(L("Pick a Color…")) { [weak self] in self?.pickColor() })
 
@@ -1061,6 +1069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "placementPending": settings.placementPending,
             "stats": stats?.debugInfo ?? [:],
             "menuItems": lastMenuItemCount,
+            "menuTitles": lastMenuTitles,
             "ruleLevel2": rules.lastResult.level.description,
             "ruleReasons": rules.lastResult.reasons.map(\.rawValue),
         ]
@@ -1214,7 +1223,12 @@ enum Debug {
         case "reload":
             app.reloadAllSettings()
         case "menu":
-            app.lastMenuItemCount = app.buildMenuForTesting().items.count
+            let menu = app.buildMenuForTesting()
+            app.lastMenuItemCount = menu.items.count
+            app.lastMenuTitles = menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
+        case "lid-pretend-on", "lid-pretend-off":
+            // Shows the "on" look without running pmset or asking for a password (debug renders).
+            app.lidAwake.debugPretend(what == "lid-pretend-on")
         case "jitter":
             app.jitterResults = JitterCheck.run()
         case "render":
