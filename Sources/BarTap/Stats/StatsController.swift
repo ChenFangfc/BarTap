@@ -32,7 +32,10 @@ final class StatsController: NSObject, NSMenuDelegate {
     private var aiSnapshot: AIUsageEngine.Snapshot?
     private var aiDisplay: AIDisplay?
     private var aiDay = ""
-    private var midnight: DispatchWorkItem?
+    /// One timer for the AI ranges' midnight rollover, moved on each recompute. (A fresh
+    /// asyncAfter per recompute kept every cancelled one pending until midnight: about a
+    /// thousand a day while an agent writes its logs.)
+    private var midnight: DispatchSourceTimer?
     /// Latest values, for previews in Settings.
     var latest: StatsSnapshot? { last }
     private var observers: [NSObjectProtocol] = []
@@ -119,6 +122,7 @@ final class StatsController: NSObject, NSMenuDelegate {
             aiDisplay = nil
             midnight?.cancel()
             midnight = nil
+            Memory.returnFreedPages(after: 1.0)
         }
     }
 
@@ -136,12 +140,15 @@ final class StatsController: NSObject, NSMenuDelegate {
         let now = Date()
         aiDay = AIUsageBook.dayKey(now, calendar: .current)
         guard let s = aiSnapshot else { aiDisplay = nil; return }
-        // Ranges start over at midnight even when nothing new is written.
-        midnight?.cancel()
+        // Ranges start over at midnight even when nothing new is written (wall clock: across sleep too).
         if let next = Calendar.current.nextDate(after: now, matching: DateComponents(hour: 0, minute: 0, second: 5), matchingPolicy: .nextTime) {
-            let work = DispatchWorkItem { [weak self] in self?.recomputeAI() }
-            midnight = work
-            DispatchQueue.main.asyncAfter(wallDeadline: .now() + next.timeIntervalSince(now), execute: work)
+            if midnight == nil {
+                let t = DispatchSource.makeTimerSource(queue: .main)
+                t.setEventHandler { [weak self] in self?.recomputeAI() }
+                t.resume()
+                midnight = t
+            }
+            midnight?.schedule(wallDeadline: .now() + next.timeIntervalSince(now), leeway: .seconds(30))
         }
         aiDisplay = AIDisplay.make(book: s.book, plans: s.plans, agents: aiAgentsShown(), range: settings.aiRange,
                                    now: now, calendar: .current, prices: { [aiPrices] in aiPrices.price($0) })
@@ -216,6 +223,10 @@ final class StatsController: NSObject, NSMenuDelegate {
         needed.remove(.volume)      // event-driven (AudioMonitor)
         needed.remove(.bluetooth)   // its own schedule (BluetoothMonitor)
         engine.setPowerInBar(wanted.contains(.battery) && settings.statsElements(.battery).contains(.batteryPower))
+        let power = wanted.contains(.power) ? settings.statsElements(.power) : []
+        engine.setPowerNeeds(StatsEngine.PowerNeeds(parts: power.contains { [.powerCPU, .powerGPU, .powerMemory, .powerANE].contains($0) },
+                                                    display: power.contains(.powerDisplay),
+                                                    details: power.contains { [.adapterRated, .cycleCount].contains($0) }))
         engine.configure(modules: needed, interval: settings.statsInterval)
         invalidateDrawn()   // items may be new: draw everything once
         render()
@@ -284,6 +295,7 @@ final class StatsController: NSObject, NSMenuDelegate {
     private(set) var renders = 0
 
     private func received(_ s: StatsSnapshot) {
+        hold.update(s, now: ProcessInfo.processInfo.systemUptime)
         var s = s
         s.ai = aiDisplay
         s.aiDetail = aiSnapshot
@@ -299,6 +311,9 @@ final class StatsController: NSObject, NSMenuDelegate {
         for (_, panel) in openPanels { panel.update(s, options) }
         evaluateAlerts(s)
     }
+
+    /// Figures the menu bar holds until they really change (see HeldValue).
+    private var hold = BarHold()
 
     /// Last signature drawn into each item; unchanged content is never re-sent.
     private var drawn: [String: String] = [:]
@@ -322,6 +337,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         didSet {
             guard dormant != oldValue else { return }
             for m in oldValue.subtracting(dormant) { drawn[m.rawValue] = nil }
+            engine.setDormant(dormant)
             render()
         }
     }
@@ -337,17 +353,19 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
         let o = options
         let now = Date()
+        // The menu bar shows held figures (see BarHold); the details show every reading.
+        let bar = last.map(hold.apply)
         let optionKey = "\(o.fahrenheit)|\(o.bits)"
         for (m, item) in items where !dormant.contains(m) {
             let elements = settings.statsElements(m)
             let width = StatsRenderer.width(m, elements, o)
             if abs(item.length - width) > 0.5 { item.length = width }
-            let sig = StatsRenderer.signature(m, elements, last, o, now: now) + optionKey
+            let sig = StatsRenderer.signature(m, elements, bar, o, now: now) + optionKey
             guard drawn[m.rawValue] != sig else { skippedUpdates += 1; continue }
             drawn[m.rawValue] = sig
             performedUpdates += 1
-            item.button?.image = StatsRenderer.image(m, elements, last, o, now: now)
-            let label = StatsRenderer.accessibilityText(m, last, o, now: now)
+            item.button?.image = StatsRenderer.image(m, elements, bar, o, now: now)
+            let label = StatsRenderer.accessibilityText(m, bar, o, now: now)
             if item.button?.accessibilityLabel() != label { item.button?.setAccessibilityLabel(label) }
         }
         if let item = combinedItem {
@@ -355,10 +373,10 @@ final class StatsController: NSObject, NSMenuDelegate {
             let gap: CGFloat = 6
             let width = max(parts.reduce(0) { $0 + StatsRenderer.width($1.m, $1.elements, o) } + gap * CGFloat(max(parts.count - 1, 0)), 10)
             if abs(item.length - width) > 0.5 { item.length = width }
-            let sig = parts.map { StatsRenderer.signature($0.m, $0.elements, last, o, now: now) }.joined(separator: "#") + optionKey
+            let sig = parts.map { StatsRenderer.signature($0.m, $0.elements, bar, o, now: now) }.joined(separator: "#") + optionKey
             guard drawn["combined"] != sig else { skippedUpdates += 1; return }
             drawn["combined"] = sig
-            let snapshot = last
+            let snapshot = bar
             item.button?.image = StatsRenderer.bitmap(width: width) { _ in
                 var x: CGFloat = 0
                 for p in parts {
@@ -372,7 +390,7 @@ final class StatsController: NSObject, NSMenuDelegate {
                     x += w + gap
                 }
             }
-            item.button?.setAccessibilityLabel(parts.map { StatsRenderer.accessibilityText($0.m, last, o) }.joined(separator: ", "))
+            item.button?.setAccessibilityLabel(parts.map { StatsRenderer.accessibilityText($0.m, bar, o) }.joined(separator: ", "))
         }
     }
 
@@ -591,7 +609,8 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
         detailTarget = id
         let tabs = id == "combined" ? DetailTabs(modules: modules, selected: module) { [weak self] m in self?.switchTab(m) } : nil
-        let content = DetailContent(panel: startPanel(module), footer: DetailFooter(actions: footerActions(for: module)), tabs: tabs)
+        let panel = startPanel(module)
+        let content = DetailContent(panel: panel, footer: DetailFooter(actions: footerActions(for: module), width: panel.frame.width), tabs: tabs)
         let window = DetailWindow(content: content)
         window.onCancel = { [weak self] in self?.presenter.dismiss() }
         detailWindow = window
@@ -636,7 +655,8 @@ final class StatsController: NSObject, NSMenuDelegate {
         let content = window.chrome.content
         if let old = detailModule { stopPanel(old) }
         combinedTab = m
-        content.replace(panel: startPanel(m), footer: DetailFooter(actions: footerActions(for: m)))
+        let panel = startPanel(m)
+        content.replace(panel: panel, footer: DetailFooter(actions: footerActions(for: m), width: panel.frame.width))
         window.fitContent()
     }
 
@@ -649,6 +669,8 @@ final class StatsController: NSObject, NSMenuDelegate {
         detailModule = nil
         detailTarget = nil
         detailItemFrame = nil
+        // A panel's views, images and the readings behind them are gone: give the pages back.
+        Memory.returnFreedPages(after: 1.0)
     }
 
     /// The details' bottom row: what the menu's footer offered.
@@ -672,7 +694,8 @@ final class StatsController: NSObject, NSMenuDelegate {
             audio?.toggleMute()
             // The button's title follows the new state.
             if detailModule == .trio, let window = detailWindow {
-                window.chrome.content.replace(panel: window.chrome.content.panel, footer: DetailFooter(actions: footerActions(for: .trio)))
+                let panel = window.chrome.content.panel
+                window.chrome.content.replace(panel: panel, footer: DetailFooter(actions: footerActions(for: .trio), width: panel.frame.width))
                 window.fitContent()
             }
         }
@@ -692,6 +715,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .network: return L("Network")
         case .sensors: return L("Sensors")
         case .battery: return L("Battery")
+        case .power: return L("Power")
         case .time: return L("Time")
         case .ai: return L("AI usage")
         case .volume: return L("Volume")
@@ -709,6 +733,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         case .network: return NetworkPanel()
         case .sensors: return SensorsPanel()
         case .battery: return BatteryPanel()
+        case .power: return PowerPanel(hasBattery: BatteryReader.quick() != nil, interval: settings.statsInterval)
         case .time: return TimePanel(worldClocks: settings.worldClocks)
         case .ai: return AIPanel(settings: settings, prices: aiPrices, agents: aiAgentsShown())
         case .volume: return VolumePanel(audio: audio, state: audio?.state)
@@ -881,6 +906,11 @@ final class StatsController: NSObject, NSMenuDelegate {
                           "age": bluetooth?.updated.map { Date().timeIntervalSince($0) } ?? -1] as [String: Any],
             "wifiBars": last?.wifi?.bars ?? -1,
             "openPanels": openPanels.count,
+            "powerDots": (openPanels[.power] as? PowerPanel)?.movingDots ?? -1,
+            "power": last?.powerReading.map { r in
+                ["system": r.system ?? -1, "adapter": r.adapter ?? -1, "battery": r.battery ?? -1,
+                 "parts": Dictionary(uniqueKeysWithValues: r.components.map { ($0.key.rawValue, $0.value) })] as [String: Any]
+            } ?? [:],
             "dormant": dormant.map(\.rawValue).sorted(),
             "slim": slim,
             "details": (["target": detailTarget ?? "-", "module": detailModule?.rawValue ?? "-",
@@ -915,6 +945,7 @@ final class StatsController: NSObject, NSMenuDelegate {
         for m in StatsModule.allCases {
             for dark in [false, true] {
                 let panel = makePanel(m)
+                (panel as? PowerPanel)?.drawStill()
                 if let last { panel.update(last, options) }
                 panel.compact()
                 DebugRender.view(panel, "panel_\(m.rawValue)_\(dark ? "dark" : "light")", dark: dark)
@@ -937,5 +968,44 @@ final class StatsController: NSObject, NSMenuDelegate {
             if m == .bluetooth { self?.bluetooth?.setDetail(false) } else if m != .volume { self?.engine.setDetail(m, false) }
             self?.openPanels[m] = nil
         }
+    }
+}
+
+/// The menu bar's held figures: what changes every second by a hair (CPU %, rates, memory,
+/// temperature) redraws only on a real change, or after a few seconds. Graphs, per-core bars and
+/// the details still follow every reading.
+struct BarHold {
+    private var cpu = HeldValue(), gpu = HeldValue(), temp = HeldValue()
+    private var up = HeldValue(), down = HeldValue(), read = HeldValue(), write = HeldValue()
+    private var memory: MemoryBreakdown?
+    private var memorySince: TimeInterval = 0
+
+    mutating func update(_ s: StatsSnapshot, now: TimeInterval) {
+        cpu.update(s.cpu?.total, now: now, significant: HeldValue.percent)
+        gpu.update(s.gpu, now: now, significant: HeldValue.percent)
+        temp.update(s.sensors?.cpu, now: now, significant: HeldValue.temperature)
+        up.update(s.netUp, now: now, significant: HeldValue.rate)
+        down.update(s.netDown, now: now, significant: HeldValue.rate)
+        read.update(s.diskRead, now: now, significant: HeldValue.rate)
+        write.update(s.diskWrite, now: now, significant: HeldValue.rate)
+        // Memory as a whole (its used/free and percentage go together): 150 MB or a point.
+        guard let m = s.memory else { memory = nil; return }
+        if let shown = memory, abs(Double(m.used) - Double(shown.used)) < 150 * 1_048_576,
+           abs(m.usedFraction - shown.usedFraction) < 0.01, now - memorySince < 5 { return }
+        memory = m
+        memorySince = now
+    }
+
+    func apply(_ snapshot: StatsSnapshot) -> StatsSnapshot {
+        var s = snapshot
+        if let v = cpu.shown, s.cpu != nil { s.cpu?.total = v }
+        if let v = gpu.shown, s.gpu != nil { s.gpu = v }
+        if let v = temp.shown, s.sensors?.cpu != nil { s.sensors?.cpu = v }
+        if let v = up.shown { s.netUp = v }
+        if let v = down.shown { s.netDown = v }
+        if let v = read.shown { s.diskRead = v }
+        if let v = write.shown { s.diskWrite = v }
+        if let m = memory, s.memory != nil { s.memory = m }
+        return s
     }
 }

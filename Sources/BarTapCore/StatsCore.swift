@@ -234,7 +234,7 @@ public enum SensorClassifier {
 // MARK: Modules & settings
 
 public enum StatsModule: String, CaseIterable {
-    case cpu, gpu, memory, disk, network, sensors, battery, time, ai, volume, bluetooth, trio
+    case cpu, gpu, memory, disk, network, sensors, battery, power, time, ai, volume, bluetooth, trio
 
     /// Elements this module can show, in the order the editor lists them.
     public var elements: [StatsElement] {
@@ -246,6 +246,8 @@ public enum StatsModule: String, CaseIterable {
         case .network: return [.label, .graph, .rates]
         case .sensors: return [.label, .temperature, .fan, .tempFan, .power]
         case .battery: return [.label, .battery, .percent, .timeLeft, .batteryPower]
+        case .power: return [.label, .powerIcon, .powerSystem, .powerIn, .powerBattery, .powerTwo, .powerCPU, .powerGPU, .powerMemory,
+                             .powerDisplay, .powerANE, .batteryVolts, .batteryAmps, .adapterRated, .cycleCount]
         case .time: return [.clock]
         case .ai: return [.label, .aiTokens, .aiCost, .aiTokensCost, .aiPlan, .aiPlanPercent, .aiPlanTwo, .aiCredits]
         case .volume: return [.label, .speaker, .percent, .levelMeter]
@@ -264,6 +266,8 @@ public enum StatsModule: String, CaseIterable {
         case .network: return [[.rates], [.graph], [.graph, .rates], [.label, .rates]]
         case .sensors: return [[.temperature], [.tempFan], [.temperature, .fan], [.power], [.label, .temperature]]
         case .battery: return [[.battery, .percent], [.percent], [.timeLeft], [.battery], [.battery, .timeLeft], [.battery, .batteryPower], [.batteryPower]]
+        case .power: return [[.powerIcon, .powerSystem], [.powerTwo], [.powerIcon, .powerIn, .powerBattery], [.powerSystem, .powerCPU, .powerGPU],
+                             [.powerCPU, .powerGPU, .powerMemory], [.powerIn], [.powerBattery], [.batteryVolts, .batteryAmps]]
         case .time: return [[.clock]]
         case .ai: return [[.aiTokensCost], [.aiCost], [.label, .aiTokens], [.aiPlan, .aiPlanPercent], [.aiPlanTwo], [.label, .aiTokensCost],
                           [.aiCredits], [.aiPlanTwo, .aiCredits]]
@@ -317,6 +321,20 @@ public enum StatsElement: String, CaseIterable {
     case lowestBattery // battery glyph + % of the connected device closest to empty
     case airPods      // two lines: L 80% / R 75% (earbuds)
     case trio         // one glyph: Wi-Fi signal and volume above the battery level
+    case powerIcon    // lightning bolt: filled on the adapter, outlined on battery
+    case powerIn      // IN 64 W: what the adapter delivers
+    case powerBattery // BAT +39 W: into (+) or out of (−) the battery
+    case powerSystem  // SYS 23 W: what the Mac uses
+    case powerTwo     // two lines: IN 64 W (BAT on battery) / SYS 23 W
+    case powerCPU     // CPU 8.1 W
+    case powerGPU     // GPU 2.3 W
+    case powerMemory  // MEM 1.9 W
+    case powerDisplay // DISP 3.0 W: the display's backlight
+    case powerANE     // ANE 0.4 W: the Neural Engine
+    case batteryVolts // 12.60 V
+    case batteryAmps  // −0.62 A
+    case adapterRated // ADP 140 W: the adapter's rating
+    case cycleCount   // CYC 193
 
     /// The single display mode of BarTap 1.0, as elements.
     public static func fromLegacyMode(_ mode: String) -> [StatsElement]? {
@@ -529,4 +547,38 @@ public enum SMCValue {
         default: return nil
         }
     }
+}
+
+// MARK: Holding the menu bar's figures
+
+/// A figure the menu bar shows: a reading that differs only a little from what is shown waits
+/// (up to `maxAge` seconds) instead of redrawing the item every second. Each redraw of a status
+/// item costs AppKit and the window server a few milliseconds per display; at idle most of the
+/// second-to-second changes are noise (7% ↔ 8%, 2 KB/s ↔ 3 KB/s). A real change shows at once.
+public struct HeldValue: Equatable {
+    public private(set) var shown: Double?
+    public private(set) var since: TimeInterval = 0
+    public init() {}
+
+    /// - Parameter significant: whether going from the shown value to the reading must show now.
+    @discardableResult
+    public mutating func update(_ reading: Double?, now: TimeInterval, maxAge: TimeInterval = 5,
+                                significant: (Double, Double) -> Bool) -> Double? {
+        guard let r = reading, r.isFinite else { shown = nil; return nil }
+        if let s = shown, !significant(s, r), now - since < maxAge { return s }
+        shown = r
+        since = now
+        return r
+    }
+
+    /// Percentages (0…1): two points.
+    public static func percent(_ shown: Double, _ reading: Double) -> Bool { abs(reading - shown) >= 0.02 }
+
+    /// Rates (bytes/s): a fifth, and at least 8 KB/s (a trickle that comes and goes waits).
+    public static func rate(_ shown: Double, _ reading: Double) -> Bool {
+        abs(reading - shown) >= max(8192, 0.2 * max(shown, reading))
+    }
+
+    /// Temperatures (°C): two degrees.
+    public static func temperature(_ shown: Double, _ reading: Double) -> Bool { abs(reading - shown) >= 2 }
 }

@@ -110,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
         statsController.openSettings = { [weak self] in self?.showSettings() }
         stats = statsController
         statsController.apply()
+        scheduleDormantCheck()
 
         wireGestures()
         configureTogglePresenter()
@@ -499,6 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             rules.configure(settings.rules)
         case "stats", "alerts":
             stats?.apply()
+            scheduleDormantCheck()
             // New or removed items change the layout; re-verify the hidden state.
             reveal.refresh()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.hintIfToggleBehindNotch() }
@@ -648,13 +650,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     /// Stats items the user put in a hidden section don't need redrawing while it is hidden.
     /// Decided only when certain: icons hidden, window names visible (Screen Recording) and the
     /// item left of the divider on an awake display. Otherwise every item keeps updating.
+    /// Stats items are laid out a second or two after they are created (at launch, or when the
+    /// modules change): only then can a hidden one be told apart, and stop redrawing (an item
+    /// left in Hidden kept redrawing until the first reveal).
+    private func scheduleDormantCheck() {
+        for delay in [2.5, 6.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.updateDormantStats() }
+        }
+    }
+
     private func updateDormantStats() {
         guard let stats else { return }
         guard reveal.effectiveLevel == .collapsed, !reveal.isCleanMode else { stats.dormant = []; return }
         let windows = SystemQueries.windows(onScreenOnly: false)
         let screens = SystemQueries.screens(windows: windows)
+        // By the window's right end: the collapsed divider is thousands of points wide, its middle
+        // far off its display (which left every hidden item redrawing).
         func awake(_ w: WindowInfo) -> Bool {
-            screens.first(where: { $0.frame.contains(CGPoint(x: w.bounds.midX, y: w.bounds.midY)) })?.asleep == false
+            screens.first(where: { $0.frame.contains(CGPoint(x: w.bounds.maxX - 1, y: w.bounds.midY)) })?.asleep == false
         }
         guard let divider = windows.first(where: { $0.layer == WindowLevel.status && $0.name == "tb_hidden" }), awake(divider) else {
             stats.dormant = []
@@ -722,15 +735,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
                 return out
             }
             panel.updateImages(ItemImages.cache.merging(own()) { $1 })
-            ItemImages.capture(listed) { images in if panel.isVisible { panel.updateImages(images.merging(own()) { $1 }) } }
+            ItemImages.capture(listed, all: items) { images in if panel.isVisible { panel.updateImages(images.merging(own()) { $1 }) } }
         }
         if AXCatalog.isTrusted { catalog.snapshot(completion: show) } else { show([]) }
     }
 
     private func closeShelf() {
         guard shelfPanel?.isVisible == true else { return }
-        shelfPanel?.orderOut(nil)
-        configureGestures()
+        shelfPanel?.dismissAnimated { [weak self] in self?.configureGestures() }
     }
 
     /// Open a menu bar icon: reveal its section if needed, then AXPress it. No pointer movement.
@@ -1049,7 +1061,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
             "layoutApply": lastLayoutApply,
             "layoutApplying": layoutApplier.running,
             "layoutPaneOpen": layoutHolds.contains("capture"),
-            "crowding": barCollapsed ? (LayoutPaneModel.crowdedDisplays() ?? "") : "",
+            "crowding": barCollapsed ? (LayoutPaneModel.crowdedDisplays(SystemQueries.windows(onScreenOnly: false)) ?? "") : "",
             "button": togglePresenter.debugInfo.merging(["source": reveal.model.userSource?.rawValue ?? ""]) { a, _ in a },
             // Displays that draw BarTap's run (toggle, then every stats item) by exact window widths.
             "ownRunOn": { () -> [Int] in

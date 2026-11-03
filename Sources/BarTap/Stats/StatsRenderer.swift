@@ -36,6 +36,9 @@ enum StatsRenderer {
     static let batteryWidth: CGFloat = 21
     /// Space between two elements, and at each end of an item.
     static let gap: CGFloat = 4
+    /// The Power item's figures each start with a tag, so they get more air between them (the tag
+    /// should read with its own value, not the one before it).
+    static func gap(_ m: StatsModule) -> CGFloat { m == .power ? 8 : gap }
     static let inset: CGFloat = 1
 
     private static func textWidth(_ s: String, _ f: NSFont) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: f]).width) }
@@ -81,6 +84,7 @@ enum StatsRenderer {
         case .network: return L("NET")
         case .sensors: return L("TEMP")
         case .battery: return L("BAT")
+        case .power: return L("PWR")
         case .time: return ""
         case .ai: return "AI"
         case .volume: return L("VOL")
@@ -124,6 +128,78 @@ enum StatsRenderer {
         case .lowestBattery: return TrioGlyphs.miniBatteryWidth + 2 + percentBox
         case .airPods: return earLabelWidth + 2 + textWidth("100%", lineFont)
         case .trio: return TrioGlyphs.trioWidth
+        case .powerIcon: return boltWidth
+        case .powerTwo: return powerTwoLabelWidth + 2 + max(textWidth("888 W", lineFont), textWidth("−88.8 W", lineFont))
+        case .powerIn, .powerBattery, .powerSystem, .powerCPU, .powerGPU, .powerMemory, .powerDisplay, .powerANE,
+             .batteryVolts, .batteryAmps, .adapterRated, .cycleCount:
+            let tag = powerTag(e).map { textWidth($0, tagFont) + 3 } ?? 0
+            return tag + (powerValueSamples(e).map { textWidth($0, valueFont) }.max() ?? 30)
+        }
+    }
+
+    // MARK: Power
+
+    static let boltWidth: CGFloat = 8
+    private static var powerTwoLabelWidth: CGFloat { [L("IN"), L("BAT"), L("SYS")].map { textWidth($0, lineFont) }.max() ?? 14 }
+
+    /// The Power item's figures: a short fixed tag, then a right-aligned value.
+    private static func powerTag(_ e: StatsElement) -> String? {
+        switch e {
+        case .powerIn: return L("IN")
+        case .powerBattery: return L("BAT")
+        case .powerSystem: return L("SYS")
+        case .powerCPU: return "CPU"
+        case .powerGPU: return "GPU"
+        case .powerMemory: return L("MEM")
+        case .powerDisplay: return L("DISP")
+        case .powerANE: return "ANE"
+        case .adapterRated: return L("ADP")
+        case .cycleCount: return L("CYC")
+        default: return nil
+        }
+    }
+
+    /// The widest values each figure can show (its box never changes size).
+    private static func powerValueSamples(_ e: StatsElement) -> [String] {
+        switch e {
+        case .powerBattery: return ["−88.8 W", "+188 W"]
+        case .batteryVolts: return ["88.88 V"]
+        case .batteryAmps: return ["−8.88 A", "+8.88 A"]
+        case .cycleCount: return ["8888"]
+        case .adapterRated: return ["888 W"]
+        default: return ["888 W", "88.8 W"]
+        }
+    }
+
+    static func powerText(_ e: StatsElement, _ v: Double?) -> String {
+        guard let v else { return "–" }
+        switch e {
+        case .powerBattery: return PowerMath.signedWatts(v)
+        case .batteryVolts: return PowerMath.volts(v)
+        case .batteryAmps: return PowerMath.amps(v, signed: true)
+        case .cycleCount: return "\(Int(v))"
+        case .adapterRated: return "\(Int(v)) W"
+        default: return PowerMath.watts(v)
+        }
+    }
+
+    /// A lightning bolt: filled while the adapter powers the Mac, outlined on battery.
+    private static func bolt(x: CGFloat, midY: CGFloat, filled: Bool) {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: x + 5.3, y: midY + 6.5))
+        p.line(to: NSPoint(x: x + 0.8, y: midY - 0.7))
+        p.line(to: NSPoint(x: x + 3.7, y: midY - 0.7))
+        p.line(to: NSPoint(x: x + 2.7, y: midY - 6.5))
+        p.line(to: NSPoint(x: x + 7.2, y: midY + 1.1))
+        p.line(to: NSPoint(x: x + 4.3, y: midY + 1.1))
+        p.close()
+        NSColor.black.set()
+        if filled {
+            p.fill()
+        } else {
+            p.lineWidth = 1.1
+            p.lineJoinStyle = .round
+            p.stroke()
         }
     }
 
@@ -136,7 +212,7 @@ enum StatsRenderer {
     private static let tagFont = NSFont.systemFont(ofSize: 8.5, weight: .heavy)
 
     private static func elementsWidth(_ m: StatsModule, _ elements: [StatsElement], _ o: Options) -> CGFloat {
-        elements.reduce(0) { $0 + elementWidth($1, m, o) } + gap * CGFloat(max(elements.count - 1, 0))
+        elements.reduce(0) { $0 + elementWidth($1, m, o) } + gap(m) * CGFloat(max(elements.count - 1, 0))
     }
 
     static func width(_ m: StatsModule, _ elements: [StatsElement], _ o: Options) -> CGFloat {
@@ -201,7 +277,7 @@ enum StatsRenderer {
         for e in elements {
             let w = elementWidth(e, m, o)
             draw(e, m, s, o, NSRect(x: x, y: r.minY, width: w, height: r.height), now)
-            x += w + gap
+            x += w + gap(m)
         }
     }
 
@@ -333,6 +409,26 @@ enum StatsRenderer {
             let b = s?.battery, a = s?.audio
             TrioGlyphs.trio(battery: b.map { Double($0.percent) / 100 }, charging: b?.charging ?? false, wifiBars: s?.wifi?.bars ?? 0,
                             waves: a.map { VolumeMath.waves($0.level, muted: $0.muted) } ?? -1, muted: a?.muted ?? false, x: r.minX, y: r.minY)
+        case .powerIcon:
+            bolt(x: r.minX, midY: r.midY, filled: s?.powerReading?.onAC ?? true)
+        case .powerTwo:
+            // Adapter in (or the battery, on battery power) above what the Mac uses; tags fixed.
+            let onAC = s?.powerReading?.onAC ?? true
+            let tagW = powerTwoLabelWidth
+            text(onAC ? L("IN") : L("BAT"), lineFont, NSRect(x: r.minX, y: 10.5, width: tagW, height: 11), align: .left)
+            text(L("SYS"), lineFont, NSRect(x: r.minX, y: 0.5, width: tagW, height: 11), align: .left)
+            let top = onAC ? powerText(.powerIn, s?.powerBar[.powerIn]) : powerText(.powerBattery, s?.powerBar[.powerBattery])
+            twoLines(top, powerText(.powerSystem, s?.powerBar[.powerSystem]),
+                     box: NSRect(x: r.minX + tagW + 2, y: 0, width: r.width - tagW - 2, height: r.height))
+        case .powerIn, .powerBattery, .powerSystem, .powerCPU, .powerGPU, .powerMemory, .powerDisplay, .powerANE,
+             .batteryVolts, .batteryAmps, .adapterRated, .cycleCount:
+            var x = r.minX
+            if let tag = powerTag(e) {
+                let w = textWidth(tag, tagFont)
+                single(tag, box: NSRect(x: x, y: r.minY, width: w, height: r.height), font: tagFont, align: .left)
+                x += w + 3
+            }
+            single(powerText(e, s?.powerBar[e]), box: NSRect(x: x, y: r.minY, width: r.maxX - x, height: r.height))
         }
     }
 
@@ -368,7 +464,7 @@ enum StatsRenderer {
         case .battery, .trio: return Double(s.battery?.percent ?? 0) / 100
         case .volume: return s.audio.map { VolumeMath.effective($0.level, muted: $0.muted) } ?? 0
         case .bluetooth: return Double(s.bluetooth?.lowest?.lowestBattery ?? 0) / 100
-        case .network, .sensors, .time, .ai: return 0
+        case .network, .sensors, .time, .ai, .power: return 0
         }
     }
 
@@ -382,7 +478,7 @@ enum StatsRenderer {
         case .battery, .trio: return s.battery.map { "\($0.percent)%" } ?? "–"
         case .volume: return s.audio.map { $0.volume == nil ? "–" : VolumeMath.percentText($0.level, muted: $0.muted) } ?? "–"
         case .bluetooth: return s.bluetooth?.lowest?.lowestBattery.map { "\($0)%" } ?? "–"
-        case .network, .sensors, .time, .ai: return "–"
+        case .network, .sensors, .time, .ai, .power: return "–"
         }
     }
 
@@ -641,6 +737,12 @@ enum StatsRenderer {
             case .bluetoothIcon: return "\(s.bluetooth?.powered ?? false)|\(s.bluetooth?.connected.count ?? -1)"
             case .lowestBattery: return "\(s.bluetooth?.lowest?.lowestBattery ?? -1)"
             case .airPods: return "\(s.bluetooth?.earbuds?.left ?? -1)|\(s.bluetooth?.earbuds?.right ?? -1)"
+            case .powerIcon: return "\(s.powerReading?.onAC ?? true)"
+            case .powerTwo:
+                return "\(s.powerReading?.onAC ?? true)|" + [StatsElement.powerIn, .powerBattery, .powerSystem].map { powerText($0, s.powerBar[$0]) }.joined(separator: "/")
+            case .powerIn, .powerBattery, .powerSystem, .powerCPU, .powerGPU, .powerMemory, .powerDisplay, .powerANE,
+                 .batteryVolts, .batteryAmps, .adapterRated, .cycleCount:
+                return powerText(e, s.powerBar[e])
             case .trio:
                 // The battery fill is ~31 px wide at 2x: one step per pixel.
                 let fill = s.battery.map { String(Int((Double($0.percent) / 100 * 31).rounded())) } ?? "-"
@@ -668,6 +770,12 @@ enum StatsRenderer {
             let rate = s.barWatts.map { ", " + PowerFlowMath.barText($0) } ?? ""
             return "Battery \(s.battery.map { "\($0.percent)%" } ?? "")" + rate
         case .time: return ""
+        case .power:
+            guard let r = s.powerReading else { return "Power" }
+            var parts = ["Power: the Mac uses \(PowerMath.watts(r.system))"]
+            if r.onAC, let a = r.adapter { parts.append("adapter \(PowerMath.watts(a))") }
+            if let b = r.battery, abs(b) >= 0.3 { parts.append(b > 0 ? "charging \(PowerMath.watts(b))" : "battery \(PowerMath.watts(b))") }
+            return parts.joined(separator: ", ")
         case .volume:
             guard let a = s.audio else { return "Volume" }
             return a.muted ? "Volume muted" : "Volume \(percentText(.volume, s))"

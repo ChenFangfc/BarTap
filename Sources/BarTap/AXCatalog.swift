@@ -100,6 +100,40 @@ final class AXCatalog {
     private var unresponsiveUntil: [pid_t: Date] = [:]
     private var inFlight = false
     private var waiters: [([BarItem]) -> Void] = []
+    /// Bundle ID and name per running app, read once on the queue: each can be a synchronous
+    /// round trip to LaunchServices, which took the main thread for tens of ms per refresh (and
+    /// seconds while LaunchServices was busy). Touched only on `queue`.
+    private var appInfo: [pid_t: (app: Weak<NSRunningApplication>, bundle: String, name: String, skip: Bool)] = [:]
+
+    private final class Weak<T: AnyObject> {
+        weak var value: T?
+        init(_ value: T) { self.value = value }
+    }
+
+    /// The apps to look at, with their bundle IDs and names (on `queue`). Terminated apps leave
+    /// the list as the main run loop notices; Accessibility simply finds nothing in one meanwhile.
+    /// Background-only processes (open/save panels, Quick Look, AutoFill: about half of what runs)
+    /// and WebKit's helpers can't own a menu bar icon, so they aren't asked.
+    private func apps(_ running: [NSRunningApplication]) -> [(pid_t, String, String)] {
+        var seen = Set<pid_t>()
+        var out: [(pid_t, String, String)] = []
+        for app in running {
+            let pid = app.processIdentifier
+            seen.insert(pid)
+            let entry: (bundle: String, name: String, skip: Bool)
+            if let known = appInfo[pid], known.app.value === app {
+                entry = (known.bundle, known.name, known.skip)
+            } else {
+                let bundle = app.bundleIdentifier ?? "pid.\(pid)"
+                let skip = app.activationPolicy == .prohibited || bundle.hasPrefix("com.apple.WebKit.")
+                entry = (bundle, app.localizedName ?? "", skip)
+                appInfo[pid] = (Weak(app), entry.bundle, entry.name, skip)
+            }
+            if !entry.skip || pid == ProcessInfo.processInfo.processIdentifier { out.append((pid, entry.bundle, entry.name)) }
+        }
+        appInfo = appInfo.filter { seen.contains($0.key) }
+        return out
+    }
 
     /// Enumerates every app's extras menu bar. Completion runs on the main thread.
     func snapshot(completion: @escaping ([BarItem]) -> Void) {
@@ -108,14 +142,12 @@ final class AXCatalog {
         guard !inFlight else { return }
         inFlight = true
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let apps: [(pid_t, String, String)] = NSWorkspace.shared.runningApplications.compactMap { app in
-            guard !app.isTerminated else { return nil }
-            return (app.processIdentifier, app.bundleIdentifier ?? "pid.\(app.processIdentifier)", app.localizedName ?? "")
-        }
+        let running = NSWorkspace.shared.runningApplications
         let skip = unresponsiveUntil.filter { $0.value > Date() }.map(\.key)
         let screens = SystemQueries.screens()
         let run = ownRun?()
         queue.async { [weak self] in
+            guard let apps = self?.apps(running) else { return }
             var items: [BarItem] = []
             var own: [String: CGRect] = [:]
             var hung: [pid_t] = []
@@ -272,7 +304,7 @@ final class AXCatalog {
 
     /// Cancels any menu that a menu bar icon has open (Accessibility only; no synthetic keys).
     func cancelOpenMenu() {
-        let pids = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }.map(\.processIdentifier)
+        let pids = NSWorkspace.shared.runningApplications.map(\.processIdentifier)
         queue.async {
             for pid in pids {
                 let app = AXUIElementCreateApplication(pid)

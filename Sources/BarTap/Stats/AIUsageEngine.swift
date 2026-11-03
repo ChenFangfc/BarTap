@@ -84,6 +84,7 @@ final class AIUsageEngine {
     private var changed = Set<String>()
     private var databasesDirty = true
     private var claudeTimer: DispatchSourceTimer?
+    private var parsedSinceRelief = 0.0
     private var detectTimer: DispatchSourceTimer?
     private var claudeJSONStamp: Date?
     private var scheduled = false
@@ -201,8 +202,13 @@ final class AIUsageEngine {
         prune()
         publish()
         markDirty()
-        // A first read parses gigabytes in passing; give the freed memory back.
-        if firstRead { Memory.returnFreedPages(after: 1.0) }
+        // A first read parses gigabytes in passing, and later reads add up (an agent's log grows
+        // all day): give the freed memory back after a big read, and every 10 MB of small ones.
+        parsedSinceRelief += totalBytes
+        if firstRead || parsedSinceRelief > 10_000_000 {
+            parsedSinceRelief = 0
+            Memory.returnFreedPages(after: 1.0)
+        }
     }
 
     /// Log files per agent (Gemini also kept whole sessions as .json before switching to JSONL).

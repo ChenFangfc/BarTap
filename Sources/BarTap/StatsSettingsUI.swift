@@ -12,6 +12,7 @@ enum StatsNames {
         case .network: return L("Network")
         case .sensors: return L("Sensors")
         case .battery: return L("Battery")
+        case .power: return L("Power")
         case .time: return L("Time")
         case .ai: return L("AI usage")
         case .volume: return L("Volume")
@@ -56,6 +57,20 @@ enum StatsNames {
         case .lowestBattery: return L("Lowest battery of connected devices")
         case .airPods: return L("AirPods left / right (two lines)")
         case .trio: return L("Battery, Wi-Fi and volume in one icon")
+        case .powerIcon: return L("Power icon (filled on the adapter)")
+        case .powerIn: return L("Adapter input (IN, W)")
+        case .powerBattery: return L("Into / out of the battery (BAT, ±W)")
+        case .powerSystem: return L("Whole Mac (SYS, W)")
+        case .powerTwo: return L("Input / whole Mac (two lines)")
+        case .powerCPU: return L("CPU power (W)")
+        case .powerGPU: return L("GPU power (W)")
+        case .powerMemory: return L("Memory power (W)")
+        case .powerDisplay: return L("Display backlight (W)")
+        case .powerANE: return L("Neural Engine power (W)")
+        case .batteryVolts: return L("Battery voltage (V)")
+        case .batteryAmps: return L("Battery current (±A)")
+        case .adapterRated: return L("Adapter rating (W)")
+        case .cycleCount: return L("Battery cycle count")
         }
     }
 
@@ -93,6 +108,20 @@ enum StatsNames {
         case .levelMeter: return L("Meter")
         case .lowestBattery: return L("Lowest")
         case .airPods: return "L/R"
+        case .powerIcon: return L("Icon")
+        case .powerIn: return L("IN")
+        case .powerBattery: return L("BAT")
+        case .powerSystem: return L("SYS")
+        case .powerTwo: return L("IN/SYS")
+        case .powerCPU: return "CPU"
+        case .powerGPU: return "GPU"
+        case .powerMemory: return L("MEM")
+        case .powerDisplay: return L("DISP")
+        case .powerANE: return "ANE"
+        case .batteryVolts: return "V"
+        case .batteryAmps: return "A"
+        case .adapterRated: return L("ADP")
+        case .cycleCount: return L("CYC")
         }
     }
 

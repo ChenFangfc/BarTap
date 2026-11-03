@@ -191,8 +191,10 @@ final class LayoutEditorView: NSView, NSViewToolTipOwner {
         if let img = images[key], img.size.height > 0 {
             let scale = min(1, Self.iconHeight / img.size.height)
             let size = NSSize(width: img.size.width * scale, height: img.size.height * scale)
-            img.draw(in: NSRect(x: iconBox.midX - size.width / 2, y: iconBox.midY - size.height / 2, width: size.width, height: size.height),
-                     from: .zero, operation: .sourceOver, fraction: alpha, respectFlipped: true, hints: nil)
+            // On whole pixels, so an icon drawn at its own size stays sharp.
+            let r = backingAlignedRect(NSRect(x: iconBox.midX - size.width / 2, y: iconBox.midY - size.height / 2, width: size.width, height: size.height),
+                                       options: [.alignMinXNearest, .alignMinYNearest, .alignWidthNearest, .alignHeightNearest])
+            img.draw(in: r, from: .zero, operation: .sourceOver, fraction: alpha, respectFlipped: true, hints: nil)
             return
         }
         guard let item = items[key] else { return }
@@ -369,6 +371,7 @@ final class LayoutPaneModel {
     func start() {
         signature = ""
         tried = []
+        crowdingCheckedAt = .distantPast
         retryUntil = Date().addingTimeInterval(ItemImages.permitted ? 8 : 2)
         reveal(true)
         // Give the bar a moment to show everything before the first look.
@@ -394,13 +397,15 @@ final class LayoutPaneModel {
             readSettled = false
             // Once the bar is out: if it can't draw every icon (beside the notch), make room.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                guard let self, self.revealing, !self.slimmed, Self.crowded() else { return }
-                self.slimmed = true
-                self.host?.setStatsSlim(true)
-                self.settledAt = Date().addingTimeInterval(0.7)
-                self.readSettled = false
-                self.signature = ""
-                self.retryUntil = max(self.retryUntil, Date().addingTimeInterval(2))
+                Self.withWindows { [weak self] windows in
+                    guard let self, self.revealing, !self.slimmed, Self.crowded(windows) else { return }
+                    self.slimmed = true
+                    self.host?.setStatsSlim(true)
+                    self.settledAt = Date().addingTimeInterval(0.7)
+                    self.readSettled = false
+                    self.signature = ""
+                    self.retryUntil = max(self.retryUntil, Date().addingTimeInterval(2))
+                }
             }
         } else if slimmed {
             slimmed = false
@@ -408,10 +413,21 @@ final class LayoutPaneModel {
         }
     }
 
+    private static let windowQueue = DispatchQueue(label: "bartap.layout.windows", qos: .userInitiated)
+
+    /// The whole window list is a round trip to the window server, slow while it is busy (a full
+    /// window list read on the main thread every refresh made this pane stall): read it on a
+    /// queue, use it on the main thread.
+    static func withWindows(_ body: @escaping ([WindowInfo]) -> Void) {
+        windowQueue.async {
+            let windows = SystemQueries.windows(onScreenOnly: false)
+            DispatchQueue.main.async { body(windows) }
+        }
+    }
+
     /// A display whose bar is drawn leaves some icons out: their windows sit in its bar, not drawn.
-    static func crowded() -> Bool {
-        let windows = SystemQueries.windows(onScreenOnly: false)
-        return SystemQueries.screens(windows: windows).contains { s in
+    static func crowded(_ windows: [WindowInfo]) -> Bool {
+        SystemQueries.screens(windows: windows).contains { s in
             guard !s.asleep, MenuBarGeometry.row(on: s, windows: windows).contains(where: \.isOnScreen) else { return false }
             return windows.contains {
                 $0.layer == WindowLevel.status && !$0.isOnScreen && abs($0.bounds.minY - s.frame.minY) <= 1
@@ -556,8 +572,7 @@ final class LayoutPaneModel {
     /// Hidden icons are hidden on every display alike (one divider for all), but a display too
     /// narrow for every shown icon leaves some out: macOS drops what doesn't fit. Names those
     /// displays, so the user can hide icons until every display shows the same.
-    static func crowdedDisplays() -> String? {
-        let windows = SystemQueries.windows(onScreenOnly: false)
+    static func crowdedDisplays(_ windows: [WindowInfo]) -> String? {
         let short = MenuBarGeometry.shortRows(screens: SystemQueries.screens(windows: windows), windows: windows)
         guard !short.isEmpty else { return nil }
         let names = Dictionary(NSScreen.screens.compactMap { screen -> (UInt32, String)? in
@@ -568,6 +583,24 @@ final class LayoutPaneModel {
             String(format: L("%@ is too narrow for every shown icon: macOS leaves out %d there. Move icons to Hidden until it fits, and every display shows the same."),
                    names[d.screen.id] ?? L("A display"), d.missing)
         }.joined(separator: "\n")
+    }
+
+    /// Displays too narrow for every shown icon, checked every few seconds while the icons are
+    /// hidden (their places are only right then).
+    private var crowdingCheckedAt = Date.distantPast
+
+    private func checkCrowding(collapsed: Bool) {
+        guard collapsed, !revealing else {
+            if crowding != nil { crowding = nil; show() }
+            return
+        }
+        guard Date().timeIntervalSince(crowdingCheckedAt) >= 5 else { return }
+        crowdingCheckedAt = Date()
+        Self.withWindows { [weak self] windows in
+            guard let self, !self.revealing, !self.applying, self.host?.barCollapsed == true else { return }
+            let c = Self.crowdedDisplays(windows)
+            if c != self.crowding { self.crowding = c; self.show() }
+        }
     }
 
     private func updateControls() {
@@ -599,10 +632,9 @@ final class LayoutPaneModel {
                 return
             }
             if sig != self.signature, self.revealing { self.retryUntil = max(self.retryUntil, Date().addingTimeInterval(2)) }
-            let crowding = host.barCollapsed && !self.revealing ? Self.crowdedDisplays() : nil
-            guard sig != self.signature || (missing && self.revealing && Date() < self.retryUntil) || crowding != self.crowding
+            self.checkCrowding(collapsed: host.barCollapsed)
+            guard sig != self.signature || (missing && self.revealing && Date() < self.retryUntil)
                     || (settled && !self.readSettled) else { return }
-            self.crowding = crowding
             self.signature = sig
             self.items = Dictionary(items.map { ($0.slotKey, $0) }, uniquingKeysWith: { first, _ in first })
             // Places are read while every icon is out; in between, only icons coming and going change

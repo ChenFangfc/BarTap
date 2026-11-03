@@ -42,7 +42,7 @@ enum DetailActions {
             add(L("Wi-Fi…"), help: L("Wi-Fi Settings…"), .wifiSettings)
             add(L("Sound…"), help: L("Sound Settings…"), .soundSettings)
             add(L("Battery…"), help: L("Battery Settings…"), .batterySettings)
-        case .battery:
+        case .battery, .power:
             add(L("Activity Monitor"), .activityMonitor)
             add(L("Battery Settings…"), .batterySettings)
         default:
@@ -108,11 +108,14 @@ final class DetailFooter: NSView {
     private(set) var buttons: [NSButton] = []
     private var targets: [ClosureTarget] = []
     private var height: CGFloat = 0
+    private let width: CGFloat
     private static let inset = NSEdgeInsets(top: 9, left: 12, bottom: 10, right: 12)
     private static let spacing: CGFloat = 6
 
-    init(actions: [DetailAction]) {
-        super.init(frame: NSRect(x: 0, y: 0, width: StatsPanel.width, height: 30))
+    /// - Parameter width: the panel's (most are `StatsPanel.width`).
+    init(actions: [DetailAction], width: CGFloat = StatsPanel.width) {
+        self.width = width
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 30))
         for a in actions {
             let b = PillButton(title: a.title, symbol: a.symbol)
             b.toolTip = a.symbol != nil ? (a.help ?? a.title) : a.help
@@ -140,7 +143,7 @@ final class DetailFooter: NSView {
 
     private func layoutButtons() {
         let inset = Self.inset
-        let available = StatsPanel.width - inset.left - inset.right
+        let available = width - inset.left - inset.right
         let widths = buttons.map { ceil($0.frame.width) }
         let rowHeight = buttons.map(\.frame.height).max() ?? 20
         var y = inset.top
@@ -153,14 +156,14 @@ final class DetailFooter: NSView {
             }
             // The last button of the last row (the settings gear) sits at the right end.
             if range.upperBound == buttons.count, let last = buttons.last {
-                last.setFrameOrigin(NSPoint(x: StatsPanel.width - inset.right - widths[buttons.count - 1], y: y))
+                last.setFrameOrigin(NSPoint(x: width - inset.right - widths[buttons.count - 1], y: y))
             }
         }
         height = buttons.isEmpty ? 1 : y + rowHeight + inset.bottom
-        setFrameSize(NSSize(width: StatsPanel.width, height: height))
+        setFrameSize(NSSize(width: width, height: height))
     }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: StatsPanel.width, height: height) }
+    override var intrinsicContentSize: NSSize { NSSize(width: width, height: height) }
 }
 
 /// Tabs for the combined item: one per module, an icon each.
@@ -176,6 +179,7 @@ final class DetailTabs: NSView {
         control.segmentDistribution = .fillEqually
         control.selectedSegment = modules.firstIndex(of: selected) ?? 0
         control.frame = NSRect(x: 12, y: 10, width: StatsPanel.width - 24, height: 24)
+        control.autoresizingMask = [.width]
         control.setAccessibilityLabel(L("Stats"))
         let t = ClosureTarget { [weak control] _ in
             guard let c = control, c.selectedSegment >= 0, c.selectedSegment < modules.count else { return }
@@ -204,6 +208,7 @@ final class DetailTabs: NSView {
         case .network: symbol = "network"
         case .sensors: symbol = "thermometer.medium"
         case .battery: symbol = "battery.75"
+        case .power: symbol = "bolt"
         case .time: symbol = "clock"
         case .ai: symbol = "sparkles"
         case .volume: symbol = "speaker.wave.2"
@@ -266,17 +271,19 @@ final class DetailContent: NSView {
         relayout()
     }
 
+    /// Panels differ in width (Power is wider); the tabs and actions follow the panel's.
     private func relayout() {
+        let width = panel.frame.width
         var y: CGFloat = 0
         if let tabs {
-            tabs.frame.origin = NSPoint(x: 0, y: 0)
+            tabs.frame = NSRect(x: 0, y: 0, width: width, height: DetailTabs.height)
             y = DetailTabs.height
         }
         panel.setFrameOrigin(NSPoint(x: 0, y: y))
         y += panel.frame.height
         footer.setFrameOrigin(NSPoint(x: 0, y: y))
         y += footer.frame.height
-        setFrameSize(NSSize(width: StatsPanel.width, height: y))
+        setFrameSize(NSSize(width: width, height: y))
     }
 }
 
@@ -378,21 +385,36 @@ final class DetailWindow: NSPanel {
 
     override func cancelOperation(_ sender: Any?) { onCancel?() }
 
-    /// Resizes to the content, keeping the top edge where it is (tab switches).
+    /// Resizes to the content, keeping the top edge where it is (tab switches) and the window
+    /// on its display (a wider panel grows leftward at the right edge).
     func fitContent() {
         chrome.fit()
         let size = chrome.frame.size
         let top = frame.maxY
-        setFrame(NSRect(x: frame.minX, y: top - size.height, width: size.width, height: size.height), display: true)
+        var x = frame.minX
+        if let visible = screen?.visibleFrame {
+            x = max(min(x, visible.maxX - 6 - size.width), visible.minX + 6)
+        }
+        setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
         invalidateShadow()
     }
 
-    /// Shows the window below `item` (global Cocoa coordinates) on `screen`.
+    /// Shows the window below `item` (global Cocoa coordinates) on `screen`: it fades in while
+    /// settling down a few points from the item, like a menu dropping open.
     func show(below item: NSRect, on screen: NSScreen?) {
         chrome.fit()
         let visible = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? item
-        setFrame(DetailPlacement.frame(below: item, size: chrome.frame.size, visible: visible), display: true)
+        let final = DetailPlacement.frame(below: item, size: chrome.frame.size, visible: visible)
+        let motion = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        setFrame(motion ? final.offsetBy(dx: 0, dy: 5) : final, display: true)
         invalidateShadow()
+        alphaValue = 0
         orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.16
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+            animator().alphaValue = 1
+            if motion { animator().setFrame(final, display: true) }
+        }
     }
 }

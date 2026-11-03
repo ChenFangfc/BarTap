@@ -35,7 +35,7 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 **Organize**
 - Hide icons behind the toggle. An optional ‖ section keeps some hidden for good.
 - Rest the pointer on the BarTap button to peek at the hidden icons: they hide again when it leaves. Click it and they stay until you click elsewhere. Scrolling and a hotkey (⌃⌥⌘B) work too.
-- On a notched Mac, a click can open the shelf: a Bartender-style dropdown with the hidden icons, real images included. Click one to open its menu.
+- On a notched Mac, a click can open the shelf: a dropdown with the hidden icons, real images included, sharp at their own size. Click one to open its menu.
 - Arrange the whole menu bar in **Settings › Layout**: real icons in rows for Shown, Hidden and Always Hidden, BarTap's own stats items included. Drag icons between the rows and along them, then click Apply. Only the icons you moved move.
 - Pick the expand/collapse button: the BarTap logo, an arrow, a dot, an ellipsis, lines or a grid.
 - One arrangement for every display: a wide screen hides exactly what a narrow one hides. If a display is too narrow for every shown icon, Settings › Layout names it.
@@ -45,11 +45,12 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 - Stay awake with the lid closed (`pmset -a disablesleep 1`): one administrator password to turn it on, none to turn it off. Sleep comes back by itself when BarTap quits or the battery runs low.
 
 **Monitor**
-- Eleven modules, refreshed every second. Build each item from elements in any order (graph, bar, pie, ring, percentage, U:/F:, R:/W:, ↑↓, label…), or pick a preset. Reorder the items too.
+- Twelve modules, refreshed every second. Build each item from elements in any order (graph, bar, pie, ring, percentage, U:/F:, R:/W:, ↑↓, label…), or pick a preset. Reorder the items too.
 - **Volume**: level and mute in the bar, scroll on it to change the volume, switch output and input devices from its dropdown.
 - **Bluetooth**: paired devices and their batteries (AirPods left, right and case too); connect or disconnect with one click.
 - **3-in-1**: battery, Wi-Fi and volume in one small icon.
 - **Battery power flow**: adapter, Mac and battery in watts, plus health, cycles and which apps use the energy.
+- **Power**: what the charger delivers, what goes into the battery, and where the Mac's power goes: CPU, GPU, memory, display, Neural Engine and the rest, in watts, live. Show any of them in the bar (one or several). Its details draw the whole flow from adapter or battery to each part, moving as the power moves, with the last two minutes, battery voltage, current, temperature, capacity, health and cycle count, the adapter's rating and what it delivers right now, and each app's power and the energy it used. No administrator password, no helper.
 - Details open when you rest the pointer on an item (passing over doesn't count) and close when it leaves; a click keeps them open until you click elsewhere. Inside: history graphs, per-core load, top processes, Wi-Fi details, daily and monthly data use, temperatures, fans, power, battery health and Bluetooth device batteries.
 - Alerts for a lost connection, a full battery, high CPU or heat, memory pressure, a low disk and a low battery.
 - World clocks, a calendar, °F and bits. Combine all stats into one item to save space by the notch.
@@ -78,6 +79,11 @@ BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GP
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/panels2-dark.webp">
   <img src="docs/media/panels2-light.webp" width="100%" alt="The battery dropdown with power flow and energy by app, the Bluetooth dropdown, and the volume dropdown">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/power-dark.webp">
+  <img src="docs/media/power-light.webp" width="100%" alt="The Power details: the flow from the adapter into the Mac and the battery, then on to CPU, GPU, memory, display and the rest; the last two minutes; battery and adapter figures; apps by power. Beside it, some of its menu bar items">
 </picture>
 
 ## Install

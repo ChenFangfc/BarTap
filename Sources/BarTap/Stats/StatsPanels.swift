@@ -74,7 +74,8 @@ final class CoreBarsView: NSView {
 
 /// A vertical form of title, big value, graph and label/value rows.
 class StatsPanel: NSView {
-    static let width: CGFloat = 300
+    /// Most panels are 300 pt wide; Power's diagram needs more.
+    class var width: CGFloat { 300 }
     let stack = NSStackView()
     private var rows: [String: NSTextField] = [:]
 

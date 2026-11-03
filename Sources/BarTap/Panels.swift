@@ -241,6 +241,7 @@ final class ShelfPanel: FloatingPanel {
     ///   - anchorX: CG x the shelf's right edge should align with (the toggle on that display).
     ///   - appearance: the menu bar's, so captured icons keep their contrast.
     func present(items: [BarItem], trusted: Bool, on screen: ScreenInfo, anchorX: CGFloat, appearance: NSAppearance?) {
+        let appearing = !isVisible || closing
         self.items = items
         self.appearance = appearance
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -282,7 +283,78 @@ final class ShelfPanel: FloatingPanel {
         }
         placement = (screen, anchorX)
         layoutAndPlace()
+        if appearing { animateIn() } else { orderFrontRegardless() }
+    }
+
+    // MARK: Motion
+
+    /// Incremented by each appearance, so a fade-out that finishes late doesn't hide a shelf
+    /// opened again meanwhile.
+    private var generation = 0
+    private var closing = false
+    private static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// The shelf drops out of the menu bar: it fades in while sliding down a few points, and its
+    /// icons follow one after another from the BarTap button leftward, each easing in from the
+    /// right. The window moves on the main thread for a fifth of a second; the icons are Core
+    /// Animation (the render server moves them).
+    private func animateIn() {
+        generation += 1
+        closing = false
+        animationBehavior = .none
+        let final = frame
+        alphaValue = 0
+        if !Self.reduceMotion { setFrame(final.offsetBy(dx: 0, dy: 7), display: false) }
         orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = Self.reduceMotion ? 0.12 : 0.22
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+            animator().alphaValue = 1
+            if !Self.reduceMotion { animator().setFrame(final, display: true) }
+        }
+        guard !Self.reduceMotion else { return }
+        let now = CACurrentMediaTime()
+        for (i, b) in buttons.reversed().enumerated() {
+            b.wantsLayer = true
+            guard let layer = b.layer else { continue }
+            let delay = min(Double(i) * 0.028, 0.3)
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = 0.2
+            let slide = CASpringAnimation(keyPath: "transform.translation.x")
+            slide.fromValue = 12
+            slide.toValue = 0
+            slide.damping = 16
+            slide.stiffness = 220
+            slide.mass = 1
+            slide.duration = slide.settlingDuration
+            let group = CAAnimationGroup()
+            group.animations = [fade, slide]
+            group.duration = slide.duration
+            group.beginTime = now + 0.04 + delay
+            group.fillMode = .backwards
+            group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(group, forKey: "appear")
+        }
+    }
+
+    /// Fades out, then leaves the screen (`orderOut` stays instant for callers that need it).
+    func dismissAnimated(_ completion: (() -> Void)? = nil) {
+        guard isVisible, !closing else { completion?(); return }
+        closing = true
+        let mine = generation
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.generation == mine, self.closing else { return }
+            self.closing = false
+            self.orderOut(nil)
+            self.alphaValue = 1
+            completion?()
+        })
     }
 
     /// Swaps in captured images, keyed by `BarItem.slotKey`, at menu bar size.
@@ -290,13 +362,11 @@ final class ShelfPanel: FloatingPanel {
         guard !images.isEmpty else { return }
         for (i, item) in items.enumerated() where i < buttons.count {
             guard let img = images[item.slotKey], img.size.height > 0 else { continue }
-            let scale = min(1, Self.iconHeight / img.size.height)
-            let size = NSSize(width: img.size.width * scale, height: img.size.height * scale)
-            let sized = NSImage(size: size, flipped: false) { r in img.draw(in: r); return true }
-            // A template takes the shelf's own ink (white on a dark shelf), as in the menu bar.
-            sized.isTemplate = img.isTemplate
+            // Pixel for pixel at its own size (a template takes the shelf's ink, as in the menu
+            // bar); a button a whole number of points wider keeps it on whole pixels.
+            let sized = ItemImages.crisp(img, maxHeight: Self.iconHeight)
             buttons[i].image = sized
-            widths[i].constant = max(size.width, 16)
+            widths[i].constant = sized.size.width + 2 * max(0, ceil((16 - sized.size.width) / 2))
         }
         layoutAndPlace()
     }
@@ -310,14 +380,23 @@ final class ShelfPanel: FloatingPanel {
         let maxX = min(max(anchorX, screen.frame.minX + width + 8), screen.frame.maxX - 8)
         let cgRect = CGRect(x: maxX - width, y: screen.frame.minY + screen.menuBarHeight + 6, width: width, height: height)
         let cocoaY = SystemQueries.mainScreenHeight - cgRect.maxY
-        setFrame(NSRect(x: cgRect.minX, y: cocoaY, width: width, height: height), display: true)
+        let target = NSRect(x: cgRect.minX, y: cocoaY, width: width, height: height)
+        // Captured images arriving change the width: ease into it instead of jumping.
+        if isVisible, !closing, abs(target.width - frame.width) > 0.5, !Self.reduceMotion {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                animator().setFrame(target, display: true)
+            }
+        } else {
+            setFrame(target, display: true)
+        }
     }
 
     @objc private func clicked(_ sender: NSButton) {
         guard sender.tag < items.count else { return }
         let item = items[sender.tag]
-        orderOut(nil)
-        onClosed?()
+        dismissAnimated { [weak self] in self?.onClosed?() }
         onActivate?(item)
     }
 

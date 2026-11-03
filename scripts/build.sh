@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
-VERSION="${VERSION:-1.5.1}"
+VERSION="${VERSION:-1.6.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 DIST=dist
 APP="$DIST/BarTap.app"
@@ -131,7 +131,9 @@ if [ "$INSTALL" = "1" ]; then
     "$LSR" -u "$APP" 2>/dev/null || true
     rm -rf "$APP"
     "$LSR" -f /Applications/BarTap.app
-    open -g /Applications/BarTap.app
+    # Right after registering, LaunchServices can refuse once (-600): try again.
+    for _ in 1 2 3 4 5; do open -g /Applications/BarTap.app 2>/dev/null && break; sleep 1; done
+    pgrep -x BarTap >/dev/null || { echo "FAIL: BarTap didn't start"; exit 1; }
     echo "    installed /Applications/BarTap.app"
 fi
 echo "==> Done"

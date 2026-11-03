@@ -78,11 +78,81 @@ enum PromoAssets {
         s.energy = [EnergyUse(key: "a", name: "Safari", watts: 1.94, processes: 8), EnergyUse(key: "b", name: "Xcode", watts: 1.21, processes: 5),
                     EnergyUse(key: "c", name: "Music", watts: 0.42, processes: 2), EnergyUse(key: "d", name: "Mail", watts: 0.21, processes: 3),
                     EnergyUse(key: "e", name: "Finder", watts: 0.05, processes: 1)]
+        samplePower(&s, step: i, charging: false)
         let ai = sampleAI(step: i)
         s.aiDetail = ai
         s.ai = AIDisplay.make(book: ai.book, plans: ai.plans, agents: [.claudeCode, .codex, .geminiCLI], range: .today,
                               now: promoNow, calendar: .current, prices: { promoPrices.price($0) })
         return s
+    }
+
+    /// The Power item's sample: on battery (as the battery figures above), or charging from a
+    /// 96 W adapter (the details' render shows every flow then). Made-up, plausible figures.
+    static func samplePower(_ s: inout StatsSnapshot, step i: Int, charging: Bool) {
+        let noise = { (n: Int) -> Double in let x = sin(Double(n) * 12.9898) * 43758.5453; return x - x.rounded(.down) }
+        var p = PowerReading()
+        p.onAC = charging
+        p.charging = charging
+        let cpu = charging ? 8.1 + 0.6 * noise(i) : 2.1 + 0.3 * noise(i)
+        p.components = charging ? [.cpu: cpu, .gpu: 2.3, .memory: 1.9, .display: 3.1, .ane: 0.4]
+                                : [.cpu: cpu, .gpu: 0.62, .memory: 0.71, .display: 2.1, .ane: 0.04]
+        p.media = 0.1
+        let parts = p.components.values.reduce(0, +)
+        p.system = parts + (charging ? 7.2 : 2.3)
+        p.battery = charging ? 36.4 : -(p.system ?? 0)
+        p.adapter = charging ? (p.system ?? 0) + 36.4 + 2.2 : nil
+        p.inputVolts = charging ? 20.3 : nil
+        p.inputAmps = charging ? (p.adapter ?? 0) / 20.3 : nil
+        p.batteryVolts = charging ? 12.61 : 12.8
+        p.batteryAmps = charging ? 2.89 : -0.62
+        s.powerReading = p
+        var bar: [StatsElement: Double] = [.powerSystem: p.system ?? 0, .powerBattery: p.battery ?? 0, .batteryVolts: p.batteryVolts ?? 0,
+                                           .batteryAmps: p.batteryAmps ?? 0, .cycleCount: 132]
+        for (e, c) in [(StatsElement.powerCPU, PowerComponent.cpu), (.powerGPU, .gpu), (.powerMemory, .memory), (.powerDisplay, .display), (.powerANE, .ane)] {
+            bar[e] = p.components[c]
+        }
+        if charging { bar[.powerIn] = p.adapter; bar[.adapterRated] = 96 }
+        s.powerBar = bar
+        var d = PowerDetails()
+        d.voltage = p.batteryVolts; d.amperage = p.batteryAmps; d.temperature = charging ? 33 : 31
+        d.cycleCount = 132; d.designCycleCount = 1000
+        d.designCapacity = 6075; d.fullChargeCapacity = 5893; d.currentCharge = charging ? 3182 : 5068
+        d.cellVoltages = charging ? [4.20, 4.21, 4.20] : [4.27, 4.26, 4.27]
+        d.dailyMinPercent = 41; d.dailyMaxPercent = 100
+        if charging {
+            d.adapterName = "96W USB-C Power Adapter"; d.adapterWatts = 96; d.adapterVolts = 20; d.adapterAmps = 4.7
+            d.adapterLoss = 2.1; d.chargingCurrent = 3
+        }
+        s.powerDetails = d
+        // Two minutes of readings: a busy stretch, then calmer.
+        var h = PowerHistory()
+        for k in 0..<PowerHistory.capacity {
+            var r = p
+            let n = k + i
+            let burst = 4 * pow(noise(n + 40), 3) + (k > 70 && k < 92 ? 3.5 : 0)
+            let scale = charging ? 1.0 : 0.3
+            r.components[.cpu] = cpu * 0.75 + burst * scale
+            r.components[.gpu] = (p.components[.gpu] ?? 0) * (0.8 + 0.5 * noise(n + 300))
+            r.components[.memory] = (p.components[.memory] ?? 0) * (0.9 + 0.2 * noise(n + 600))
+            r.components[.ane] = (p.components[.ane] ?? 0) * (k > 100 ? 4 : 1)
+            r.system = r.components.values.reduce(0, +) + (charging ? 7.2 : 2.3)
+            r.adapter = charging ? (r.system ?? 0) + 36.4 + 2.2 : nil
+            h.append(r)
+        }
+        s.powerHistory = h
+        let apps: [(String, String, Double, Int, Double)] = [
+            ("/Applications/Safari.app", "Safari", charging ? 2.9 : 0.84, 9, 31_000),
+            ("/System/Applications/Photos.app", "Photos", charging ? 2.2 : 0.21, 4, 12_400),
+            ("/System/Applications/Music.app", "Music", charging ? 0.61 : 0.33, 3, 6_200),
+            ("/System/Applications/Mail.app", "Mail", 0.27, 3, 3_900),
+            ("/System/Library/CoreServices/Finder.app", "Finder", 0.08, 1, 2_100),
+        ]
+        s.powerApps = apps.map { EnergyUse(key: $0.0, name: $0.1, watts: $0.2, processes: $0.3, joules: $0.4) }
+        s.energyMeasuring = false
+        if charging {
+            s.battery = BatteryInfo(percent: 54, charging: true, onAC: true, charged: false, minutesRemaining: 72, cycles: 132, healthPercent: 97,
+                                    temperature: 33, voltage: 12.61, amperage: 2.89, adapterWatts: 96, condition: "Normal")
+        }
     }
 
     /// Fixed "now" for sample AI data, so renders are reproducible.
@@ -145,16 +215,20 @@ enum PromoAssets {
         // Every preset and every single element of every module, for review and the README.
         try? fm.createDirectory(at: dir.appendingPathComponent("gallery"), withIntermediateDirectories: true)
         let sample = sampleSnapshot(step: 3)
+        // Power's items show the same moment as its details (charging): every flow has a figure.
+        var chargingSample = sample
+        samplePower(&chargingSample, step: 3, charging: true)
         for m in StatsModule.allCases {
+            let shown = m == .power ? chargingSample : sample
             for (i, elements) in m.presets.enumerated() {
                 let img = StatsRenderer.bitmap(width: StatsRenderer.width(m, elements, o), scale: 6) { r in
-                    StatsRenderer.drawContent(m, elements, sample, o, r, now: clockDate)
+                    StatsRenderer.drawContent(m, elements, shown, o, r, now: clockDate)
                 }
                 write(img, dir.appendingPathComponent("gallery/\(m.rawValue)-preset\(i).png"))
             }
             for e in m.elements {
                 let img = StatsRenderer.bitmap(width: StatsRenderer.width(m, [e], o), scale: 6) { r in
-                    StatsRenderer.drawContent(m, [e], sample, o, r, now: clockDate)
+                    StatsRenderer.drawContent(m, [e], shown, o, r, now: clockDate)
                 }
                 write(img, dir.appendingPathComponent("gallery/\(m.rawValue)-el-\(e.rawValue).png"))
             }
@@ -192,8 +266,14 @@ enum PromoAssets {
                                                ("ai", aiPanel), ("volume", VolumePanel(audio: nil, state: s.audio)),
                                                ("bluetooth", BluetoothPanel(state: s.bluetooth, updated: promoNow, access: .allowed)),
                                                ("trio", TrioPanel())]
-        for (name, panel) in panels {
-            panel.update(s, o)
+        var charging = s
+        samplePower(&charging, step: 3, charging: true)
+        let power = PowerPanel(hasBattery: true, interval: 1)
+        power.drawStill()
+        let onBattery = PowerPanel(hasBattery: true, interval: 1)
+        onBattery.drawStill()
+        for (name, panel) in panels + [("power", power as StatsPanel), ("power_onbattery", onBattery)] {
+            panel.update(name == "power" ? charging : s, o)
             panel.compact()
             for dark in [false, true] {
                 capture(panel, dark: dark, scale: 2, to: dir.appendingPathComponent("panel_\(name)_\(dark ? "dark" : "light").png"))

@@ -14,9 +14,10 @@ BarTap 安装说明 / Install
    （拖动图标排好显示/隐藏和顺序，点「应用」）；再允许「录屏」，这些地方会显示真实图标。
    隐藏功能本身不需要任何权限，升级后授权也会保留。
 5. 如果你在用 Bartender / Ice / Hidden Bar，请先退出它们，避免两个工具抢同一批图标。
-6. 系统监控（CPU、GPU、内存、磁盘、网络、传感器、电池、时间、音量、蓝牙、三合一状态图标）和 AI 用量
+6. 系统监控（CPU、GPU、内存、磁盘、网络、传感器、电池、用电、时间、音量、蓝牙、三合一状态图标）和 AI 用量
    （Claude Code、Codex 等的 token、费用和套餐额度）都在「设置 › 系统监控」里打开。AI 用量只读本机日志，
-   不要密钥，不用登录。
+   不要密钥，不用登录。「用电」显示充电器输入、充入电池的功率和 CPU/GPU/内存/屏幕等各部件的瓦数，
+   可任选几项放进菜单栏；指针停在上面会展开流向图、电池电压电流、循环次数和各 App 的耗电。
 7. 下载视频：在「设置 › 视频下载」里粘贴链接（或右键点 BarTap 开关 › 下载视频…）。基于 yt-dlp；
    没装的话，BarTap 可以从它的官方发布页获取（会校验校验和）。请只下载你有权下载的视频。
 8. 合盖不睡眠：右键点 BarTap 开关 ›「开启合盖不睡眠…」，或在「设置 › 小工具」里开启。开启时输入一次
@@ -41,10 +42,13 @@ BarTap 安装说明 / Install
    Recording too for real icons there. Hiding itself needs no permission, and
    grants survive updates.
 5. Quit other menu bar managers (Bartender, Ice, Hidden Bar) first.
-6. Turn on system stats (CPU, GPU, memory, disk, network, sensors, battery, time,
+6. Turn on system stats (CPU, GPU, memory, disk, network, sensors, battery, power, time,
    volume, Bluetooth, a 3-in-1 status icon) and AI usage (tokens, cost and plan
    limits of Claude Code, Codex and others) in Settings › Stats. AI usage only reads
-   local logs: no keys, no sign-in.
+   local logs: no keys, no sign-in. Power shows what the charger delivers, what goes
+   into the battery and the watts of CPU, GPU, memory, display and more; put any of
+   them in the bar, and rest the pointer on it for the flow diagram, battery voltage,
+   current and cycles, and each app's energy.
 7. Video downloads: paste a link in Settings › Downloads (or right-click the toggle ›
    Download Video…). Uses yt-dlp; if it isn't installed, BarTap can fetch its official
    release (checksum verified). Download only videos you have the right to.

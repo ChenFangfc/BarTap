@@ -21,8 +21,11 @@ enum ItemImages {
     /// Only icons of the latest capture are kept: a few KB each, on disk too, so a restart doesn't
     /// leave the shelf with app icons until every icon is out again.
     private(set) static var cache: [String: NSImage] = loadStore()
+    /// v3: icons matched by their windows' names, trimmed to the glyph, and only real glyphs. The
+    /// earlier stores could hold one app's icon under another's name, or an icon's empty window.
     private static let store = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("BarTap/icon-images.plist")
+        .appendingPathComponent("BarTap/icon-images-v3.plist")
+    private static let oldStores = ["icon-images.plist", "icon-images-v2.plist"].map { store.deletingLastPathComponent().appendingPathComponent($0) }
     private static var saveScheduled = false
     /// What happened to each icon in the last capture (debug).
     private(set) static var lastLog: [String: String] = [:]
@@ -33,8 +36,13 @@ enum ItemImages {
     /// is captured with only that window in it, cropped to the button: a window captured on its own
     /// comes back blank for template icons (most of them), which the menu bar tints as it composites.
     /// Hidden icons are drawn nowhere and are simply missing. Completion runs on the main thread.
-    static func capture(_ items: [BarItem], completion: @escaping ([String: NSImage]) -> Void) {
+    ///
+    /// - Parameter all: every icon in the bar (when `items` are some of them), to tell which of an
+    ///   app's windows is which.
+    static func capture(_ items: [BarItem], all: [BarItem]? = nil, completion: @escaping ([String: NSImage]) -> Void) {
         guard #available(macOS 14.0, *), permitted, !items.isEmpty else { completion([:]); return }
+        // Each app's icons, left to right (the k-th of an app's windows is its k-th icon).
+        let byApp = Dictionary(grouping: all ?? items, by: \.bundleID).mapValues { $0.sorted { $0.order > $1.order }.map(\.slotKey) }
         let screens = SystemQueries.screens()
         let scales = Dictionary(NSScreen.screens.compactMap { s -> (CGDirectDisplayID, CGFloat)? in
             guard let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
@@ -42,6 +50,14 @@ enum ItemImages {
         }, uniquingKeysWith: { first, _ in first })
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
             guard let content else { DispatchQueue.main.async { completion([:]) }; return }
+            // macOS 26 names a status item's window after its app's bundle ID on each display but the
+            // one hosting the bar (with Screen Recording, which capturing needs anyway). Places from
+            // Accessibility can be stale for icons that were hidden, and matching by place alone once
+            // filed one app's icon under another; a name can't be wrong.
+            let names = Dictionary(SystemQueries.windows(onScreenOnly: true).compactMap { w -> (CGWindowID, String)? in
+                guard w.layer == WindowLevel.status, let n = w.name, !n.isEmpty else { return nil }
+                return (CGWindowID(w.id), n)
+            }, uniquingKeysWith: { first, _ in first })
             let drawn: [(window: SCWindow, rd: CGFloat, display: SCDisplay)] = content.windows.compactMap { w in
                 guard w.windowLayer == WindowLevel.status, w.isOnScreen,
                       let s = screens.first(where: { $0.frame.contains(CGPoint(x: w.frame.midX, y: w.frame.midY)) }),
@@ -56,15 +72,27 @@ enum ItemImages {
             for item in items {
                 let centre = item.order + item.frame.width / 2
                 func scale(_ d: SCDisplay) -> CGFloat { scales[d.displayID] ?? 2 }
-                // Its window on each display, sharpest bar first (a 1x display's copy comes out soft
-                // on a Retina one), then widest: a narrow bar may not draw it (an icon that doesn't
-                // fit is still listed but comes back blank).
-                let candidates = drawn.filter { d in
+                // By name: on a display that draws all of the app's icons, its k-th window.
+                let siblings = byApp[item.bundleID] ?? [item.slotKey]
+                let k = siblings.firstIndex(of: item.slotKey) ?? 0
+                var named: [(window: SCWindow, rd: CGFloat, display: SCDisplay)] = []
+                for display in content.displays {
+                    let mine = drawn.filter { $0.display.displayID == display.displayID && names[$0.window.windowID] == item.bundleID }
+                        .sorted { $0.window.frame.minX < $1.window.frame.minX }
+                    if mine.count == siblings.count, k < mine.count { named.append(mine[k]) }
+                }
+                // Otherwise by place (Control Center's icons are unnamed; the hosting display uses
+                // autosave names). Measured: centres agree within 2 pt; most windows are the button
+                // plus 14–16 pt of padding, a few apps' (Electron, Catalyst) 2 pt narrower.
+                let placed = drawn.filter { d in
                     let w = d.window.frame.width
-                    // Measured: centres agree within 2 pt; most windows are the button plus 14–16 pt of
-                    // padding, a few apps' (Electron, Catalyst) 2 pt narrower than their button.
                     return abs(d.rd + w / 2 - centre) <= 4 && w >= item.frame.width - 4 && w - item.frame.width <= 28
-                }.sorted { (scale($0.display), $0.display.frame.width) > (scale($1.display), $1.display.frame.width) }
+                        && (names[d.window.windowID].map { n in Self.mayBelong(n, to: item.bundleID) } ?? true)
+                }
+                // Sharpest bar first (a 1x display's copy comes out soft on a Retina one), then widest:
+                // a narrow bar may not draw it (an icon that doesn't fit is still listed but blank).
+                let candidates = (named.isEmpty ? placed : named)
+                    .sorted { (scale($0.display), $0.display.frame.width) > (scale($1.display), $1.display.frame.width) }
                 guard !candidates.isEmpty else { log[item.slotKey] = "no window"; continue }
                 group.enter()
                 // Each display's copy, first alone (a clean icon), then as composited on screen: some
@@ -89,10 +117,17 @@ enum ItemImages {
                     let filter = alone ? SCContentFilter(display: display, including: [window]) : SCContentFilter(display: display, excludingWindows: [])
                     SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
                         guard let image, hasContent(image) else { attempt(i + 1); return }
-                        lock.lock()
                         let clean = alone ? detached(image) : withoutBackground(image)
                         let template = templated(clean ?? image)
-                        let result = NSImage(cgImage: template ?? clean ?? image, size: size)
+                        // Just the glyph: shown at its own size, never shrunk to fit a row.
+                        let glyph = template ?? clean ?? image
+                        let final = trimmed(glyph) ?? glyph
+                        // An app that hasn't drawn its icon yet (it was off screen) leaves its window
+                        // empty but for a faint backdrop or an edge: not an icon, try elsewhere/later.
+                        guard isGlyph(final) else { attempt(i + 1); return }
+                        lock.lock()
+                        let px = scale(display)
+                        let result = NSImage(cgImage: final, size: NSSize(width: CGFloat(final.width) / px, height: CGFloat(final.height) / px))
                         result.isTemplate = template != nil
                         images[item.slotKey] = result
                         log[item.slotKey] = (alone ? "ok" : "ok (screen)") + (template != nil ? ", template" : "")
@@ -104,7 +139,8 @@ enum ItemImages {
             }
             group.notify(queue: .main) {
                 lastLog = log
-                let current = Set(items.map(\.slotKey))
+                // Icons still in the bar keep their images (the shelf captures only hidden ones).
+                let current = Set((all ?? items).map(\.slotKey))
                 let kept = cache.filter { current.contains($0.key) }
                 if !images.isEmpty || kept.count != cache.count { scheduleSave() }
                 cache = kept.merging(images) { $1 }
@@ -116,6 +152,7 @@ enum ItemImages {
     // MARK: On disk
 
     private static func loadStore() -> [String: NSImage] {
+        for old in oldStores { try? FileManager.default.removeItem(at: old) }
         guard let data = try? Data(contentsOf: store),
               let rows = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: [String: Any]] else { return [:] }
         var out: [String: NSImage] = [:]
@@ -126,6 +163,7 @@ enum ItemImages {
             rep.size = image.size
             image.addRepresentation(rep)
             image.isTemplate = row["template"] as? Bool ?? false
+            if let cg = rep.cgImage, !isGlyph(cg) { continue }
             out[key] = image
         }
         return out
@@ -227,15 +265,97 @@ enum ItemImages {
         guard ink > 0, coloured / ink < 0.02 else { return nil }
         // A white icon (drawn for a dark bar) is as strong as it is light, a black one as it is dark.
         let white = light / ink >= 0.5
+        var alpha = [Double](repeating: 0, count: w * h)
+        var strongest = 0.0
         for i in 0..<(w * h) {
             let o = i * 4
             guard p[o + 3] > 0 else { continue }
-            let strength = white ? lum(o) : 1 - lum(o)
-            let a = UInt8(min(max(Double(p[o + 3]) * strength, 0), 255))
+            alpha[i] = Double(p[o + 3]) * (white ? lum(o) : 1 - lum(o))
+            strongest = max(strongest, alpha[i])
+        }
+        // The glyph's core fully opaque, as the menu bar draws it: a capture through the bar's
+        // vibrancy comes out a shade or two weaker, which read as grey and soft on the shelf. Faint
+        // specks of what was behind the bar go.
+        // (Only a glyph that is already strong: a faint backdrop must stay faint.)
+        let gain = strongest >= 140 ? 255 / strongest : 1
+        for i in 0..<(w * h) {
+            let o = i * 4
+            let a = min(alpha[i] * gain, 255)
             p[o] = 0; p[o + 1] = 0; p[o + 2] = 0
-            p[o + 3] = a
+            p[o + 3] = a < 20 ? 0 : UInt8(a)
         }
         return ctx.makeImage()
+    }
+
+    /// A window's name rules out a match when it names another app (a bundle ID) or is one of
+    /// BarTap's own (its autosave names start "tb_").
+    static func mayBelong(_ name: String, to bundleID: String) -> Bool {
+        if name.hasPrefix("tb_") { return bundleID == Bundle.main.bundleIdentifier }
+        return name.contains(".") ? name == bundleID : true
+    }
+
+    /// Without the empty bar around the glyph (one pixel of it kept; faint specks of what was
+    /// behind the bar don't count). Rows of memory run top down, as `cropping(to:)` counts them.
+    static func trimmed(_ image: CGImage) -> CGImage? {
+        let w = image.width, h = image.height
+        guard w > 2, h > 2, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue),
+              let data = ctx.data else { return nil }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let a = data.bindMemory(to: UInt8.self, capacity: w * h)
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w where a[y * w + x] > 48 {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let x0 = max(0, minX - 1), y0 = max(0, minY - 1)
+        return image.cropping(to: CGRect(x: x0, y: y0, width: min(w, maxX + 2) - x0, height: min(h, maxY + 2) - y0))
+    }
+
+    /// An icon for a row of icons (the shelf): trimmed, then on a canvas of whole points (an even
+    /// number high) drawn pixel for pixel and centred on whole pixels. A menu bar glyph shrunk by
+    /// a fraction or shifted half a pixel is what looked blurry.
+    static func crisp(_ image: NSImage, maxHeight: CGFloat) -> NSImage {
+        guard image.size.width > 0, image.size.height > 0,
+              var cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
+        let scale = max(1, (CGFloat(cg.width) / image.size.width).rounded())
+        cg = trimmed(cg) ?? cg
+        var w = CGFloat(cg.width) / scale, h = CGFloat(cg.height) / scale
+        let shrink = h > maxHeight
+        if shrink { w *= maxHeight / h; h = maxHeight }
+        let canvas = NSSize(width: ceil(w), height: ceil(h / 2) * 2)
+        let pw = Int(canvas.width * scale), ph = Int(canvas.height * scale)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+        ctx.interpolationQuality = shrink ? .high : .none
+        let dw = shrink ? Int((w * scale).rounded()) : cg.width, dh = shrink ? Int((h * scale).rounded()) : cg.height
+        ctx.draw(cg, in: CGRect(x: (pw - dw) / 2, y: (ph - dh) / 2, width: dw, height: dh))
+        guard let out = ctx.makeImage() else { return image }
+        let result = NSImage(cgImage: out, size: canvas)
+        result.isTemplate = image.isTemplate
+        return result
+    }
+
+    /// Real ink: a few dozen strong pixels over at least 4 × 4 px (an empty window's backdrop is
+    /// faint everywhere; an edge is a line).
+    static func isGlyph(_ image: CGImage) -> Bool {
+        let w = image.width, h = image.height
+        guard w >= 4, h >= 4, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue),
+              let data = ctx.data else { return false }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let a = data.bindMemory(to: UInt8.self, capacity: w * h)
+        var strong = 0, minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w where a[y * w + x] >= 128 {
+                strong += 1
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        return strong >= 12 && maxX - minX >= 3 && maxY - minY >= 3
     }
 
     /// A capture of an icon the window server didn't draw comes back fully transparent.

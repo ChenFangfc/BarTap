@@ -2,7 +2,7 @@
 //
 //   swiftc -O promo/shots.swift -o .build/shots && .build/shots <repo>
 //
-// Writes docs/media/{bar,panels,panels2,layouts}-{light,dark}.png.
+// Writes docs/media/{bar,panels,panels2,power,layouts}-{light,dark}.png.
 import AppKit
 
 let root = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
@@ -93,6 +93,36 @@ for dark in [false, true] {
 }
 }
 
+// 2b. Power: its details (charging, sample figures) beside some of its menu bar items.
+for dark in [false, true] {
+    let panel = asset("panel_power_\(dark ? "dark" : "light").png")
+    let chips = ["power-preset0", "power-preset2", "power-preset1", "power-preset3", "power-preset4", "power-preset7"].map { asset("gallery/\($0).png") }
+    let m: CGFloat = 36, pg: CGFloat = 40, chipH: CGFloat = 30, chipPad: CGFloat = 8, chipGap: CGFloat = 14
+    let chipsW = (chips.map(\.size.width).max() ?? 0) + 2 * chipPad
+    let w = m + panel.size.width + pg + chipsW + m
+    let h = panel.size.height + 2 * m
+    render(NSSize(width: w, height: h), scale: 2, "power-\(dark ? "dark" : "light").png") {
+        let r = NSRect(x: m, y: m, width: panel.size.width, height: panel.size.height)
+        let path = card(r, radius: 12, dark: dark, fill: dark ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.985, alpha: 1), shadowBlur: 24)
+        NSGraphicsContext.saveGraphicsState()
+        path.addClip()
+        panel.draw(in: r)
+        NSGraphicsContext.restoreGraphicsState()
+        (dark ? NSColor.white.withAlphaComponent(0.12) : NSColor.black.withAlphaComponent(0.08)).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        // The menu bar items, top-aligned with the panel, as they sit in the bar.
+        let ink = dark ? NSColor.white : NSColor(white: 0.08, alpha: 1)
+        var y = r.maxY - chipH
+        for img in chips {
+            let chip = NSRect(x: r.maxX + pg, y: y, width: img.size.width + 2 * chipPad, height: chipH)
+            _ = card(chip, radius: 7, dark: dark, fill: dark ? NSColor(white: 0.14, alpha: 1) : NSColor(white: 0.975, alpha: 1), shadowBlur: 6)
+            tinted(img, ink).draw(in: NSRect(x: chip.minX + chipPad, y: chip.midY - img.size.height / 2, width: img.size.width, height: img.size.height))
+            y -= chipH + chipGap
+        }
+    }
+}
+
 // 3. Layouts: a few combinations per module, each on its own menu-bar strip.
 let rows: [(String, [String])] = [
     ("CPU", ["cpu-preset0", "cpu-preset5", "cpu-preset4", "cpu-preset3", "cpu-preset7"]),
@@ -101,6 +131,7 @@ let rows: [(String, [String])] = [
     ("Network · Sensors · Battery", ["network-preset0", "network-preset2", "sensors-preset1", "battery-preset0", "battery-preset5"]),
     ("Volume · Bluetooth · 3-in-1", ["volume-preset0", "volume-preset3", "bluetooth-preset1", "bluetooth-preset4", "trio-preset1"]),
     ("AI usage", ["ai-preset5", "ai-preset6", "ai-preset3", "ai-preset4", "ai-peragent0"]),
+    ("Power", ["power-preset0", "power-preset1", "power-preset2", "power-preset3", "power-preset7"]),
 ]
 let chipGap: CGFloat = 10, chipPad: CGFloat = 8, rowH: CGFloat = 30, labelW: CGFloat = 190, lm: CGFloat = 20
 let rowImages = rows.map { ($0.0, $0.1.map { asset("gallery/\($0).png") }) }

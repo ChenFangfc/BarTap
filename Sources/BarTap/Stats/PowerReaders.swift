@@ -71,7 +71,9 @@ final class EnergyReader {
     /// True until two samples exist.
     var measuring: Bool { window.isEmpty }
 
-    func sample(top n: Int = 5) -> [EnergyUse] {
+    /// - Parameter totals: also add up each app's energy since its processes started (the
+    ///   first pass looks up every process's app once, a few ms; later passes reuse it).
+    func sample(top n: Int = 5, totals: Bool = false) -> [EnergyUse] {
         var pids = [pid_t](repeating: 0, count: 8192)
         let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, Int32(pids.count * MemoryLayout<pid_t>.size))
         let count = max(0, Int(bytes) / MemoryLayout<pid_t>.size)
@@ -80,6 +82,7 @@ final class EnergyReader {
         var current: [pid_t: (start: UInt64, energy: UInt64)] = [:]
         current.reserveCapacity(count)
         var samples: [EnergySample] = []
+        var total: [String: Double] = [:]
         for i in 0..<count {
             let pid = pids[i]
             guard pid > 0 else { continue }
@@ -89,6 +92,9 @@ final class EnergyReader {
             }
             guard ok == 0 else { continue }
             current[pid] = (ri.ri_proc_start_abstime, ri.ri_energy_nj)
+            if totals, ri.ri_energy_nj > 0 {
+                total[owner(pid, start: ri.ri_proc_start_abstime).key, default: 0] += Double(ri.ri_energy_nj) / 1e9
+            }
             // Same process as last time (pids are reused), and its counter only grows.
             guard seconds > 0, let p = previous[pid], p.start == ri.ri_proc_start_abstime, ri.ri_energy_nj > p.energy else { continue }
             let owner = owner(pid, start: ri.ri_proc_start_abstime)
@@ -98,7 +104,9 @@ final class EnergyReader {
         owners = owners.filter { current[$0.key]?.start == $0.value.start }
         previous = current
         previousTime = now
-        return window.top(n)
+        var uses = window.top(n)
+        if totals { for i in uses.indices { uses[i].joules = total[uses[i].key] ?? 0 } }
+        return uses
     }
 
     func reset() {

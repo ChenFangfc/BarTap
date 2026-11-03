@@ -369,8 +369,10 @@ public struct EnergyUse: Equatable {
     public var name: String
     public var watts: Double
     public var processes: Int
-    public init(key: String, name: String, watts: Double, processes: Int) {
-        self.key = key; self.name = name; self.watts = watts; self.processes = processes
+    /// Energy its running processes used since each of them started (0: not read).
+    public var joules: Double
+    public init(key: String, name: String, watts: Double, processes: Int, joules: Double = 0) {
+        self.key = key; self.name = name; self.watts = watts; self.processes = processes; self.joules = joules
     }
 }
 

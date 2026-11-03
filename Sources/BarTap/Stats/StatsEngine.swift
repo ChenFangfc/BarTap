@@ -77,6 +77,14 @@ struct StatsSnapshot {
     var energy: [EnergyUse]?
     /// The first sample after opening has nothing to compare with yet.
     var energyMeasuring = false
+    /// Power item: the reading (averaged over a few seconds), battery and adapter details (the
+    /// details, or elements that show them), the details' graph and apps by energy, and the
+    /// figures the menu bar shows (settled; see PowerMath.settle).
+    var powerReading: PowerReading?
+    var powerDetails: PowerDetails?
+    var powerHistory: PowerHistory?
+    var powerApps: [EnergyUse]?
+    var powerBar: [StatsElement: Double] = [:]
 }
 
 /// Samples system metrics on a private utility queue with one coalesced timer. Only what is
@@ -84,6 +92,13 @@ struct StatsSnapshot {
 /// displays sleep or when nothing needs it.
 final class StatsEngine {
     var onSnapshot: ((StatsSnapshot) -> Void)?
+
+    /// What the Power item's menu bar elements need beyond the flow (adapter, battery, system).
+    struct PowerNeeds: Equatable {
+        var parts = false     // CPU, GPU, memory, Neural Engine: the chip's energy model
+        var display = false   // the backlight
+        var details = false   // adapter rating, cycle count (AppleSmartBattery, once a minute)
+    }
 
     private let queue = DispatchQueue(label: "bartap.stats", qos: .utility)
     private var timer: DispatchSourceTimer?
@@ -113,6 +128,17 @@ final class StatsEngine {
     private var lastVolumeTime: TimeInterval = 0
     private let processes = ProcessReader()
     private let energy = EnergyReader()
+    private let energyModel = EnergyModelReader()
+    private var powerNeeds = PowerNeeds()
+    private var powerLast: PowerReading?
+    private var powerHistory = PowerHistory()
+    private var powerDetails: PowerDetails?
+    private var powerDetailsAt: TimeInterval = 0
+    private var powerShown: [StatsElement: Double] = [:]
+    private var powerApps: [EnergyUse]?
+    private var powerAppsTick = 0
+    /// Items nobody can see right now (hidden in the bar): the Power item skips its readings.
+    private var dormant: Set<StatsModule> = []
     private var powerInBar = false
     private var barWatts: Double?
     private var wifi: WiFiLink?
@@ -169,6 +195,25 @@ final class StatsEngine {
         }
     }
 
+    func setPowerNeeds(_ n: PowerNeeds) {
+        queue.async {
+            self.powerNeeds = n
+            if !n.parts && !self.detail.contains(.power) { self.energyModel.reset() }
+        }
+    }
+
+    /// Items hidden in the bar (see StatsController.dormant).
+    func setDormant(_ modules: Set<StatsModule>) {
+        queue.async {
+            self.dormant = modules
+            if modules.contains(.power) && !self.detail.contains(.power) {
+                // Hidden: the next reading starts over instead of averaging across the gap.
+                self.energyModel.reset()
+                self.powerLast = nil
+            }
+        }
+    }
+
     /// Wi-Fi joins and drops arrive as path changes, so the 3-in-1 item's signal is re-read at
     /// once instead of polled fast (it is otherwise read every 10 s).
     private func watchWiFi(_ on: Bool) {
@@ -190,7 +235,8 @@ final class StatsEngine {
         queue.async {
             if on { self.detail.insert(module) } else { self.detail.remove(module) }
             if !self.detail.contains(.cpu) && !self.detail.contains(.memory) && !self.detail.contains(.disk) { self.processes.reset() }
-            if !self.detail.contains(.battery) { self.energy.reset() }
+            if !self.detail.contains(.battery) && !self.detail.contains(.power) { self.energy.reset() }
+            if !self.detail.contains(.power) && !self.powerNeeds.parts { self.energyModel.reset() }
             self.reschedule(primeNow: on)
         }
     }
@@ -204,6 +250,8 @@ final class StatsEngine {
             self.prevNet = nil
             self.prevDisk = nil
             self.prevPages = nil
+            self.energyModel.reset()
+            self.powerLast = nil
             if on { self.saveUsage() }
             self.reschedule(primeNow: !on)
         }
@@ -353,6 +401,9 @@ final class StatsEngine {
                 s.energyMeasuring = energy.measuring
             }
         }
+        if active.contains(.power), !dormant.contains(.power) || detail.contains(.power) {
+            samplePower(into: &s, now: now)
+        }
         if active.contains(.trio) {
             let full = detail.contains(.trio)
             if full || wifiStale || wifi == nil || now - wifiReadAt >= max(interval, 10) {
@@ -371,6 +422,74 @@ final class StatsEngine {
         }
         let snapshot = s
         DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
+    }
+
+    private func samplePower(into s: inout StatsSnapshot, now: TimeInterval) {
+        let open = detail.contains(.power)
+        let battery = s.battery ?? BatteryReader.quick()
+        if s.battery == nil { s.battery = battery }
+        if smc == nil { smc = SMC() }
+        let parts = open || powerNeeds.parts
+        var r = PowerSampler.read(smc: smc, battery: battery, full: parts || powerNeeds.display)
+        if parts, let model = energyModel.sample() {
+            r.components.merge(model.components) { _, chip in chip }
+            r.media = model.media
+        }
+        let reading = PowerMath.smoothed(powerLast, r)
+        powerLast = reading
+        powerHistory.append(reading)
+        s.powerReading = reading
+        // The battery's own figures (capacity, cells, adapter) change slowly: every 5 s with the
+        // details open (voltage and current come from the SMC every second), once a minute for
+        // the menu bar's rating and cycle count.
+        if open || powerNeeds.details, powerDetails == nil || now - powerDetailsAt >= (open ? 5 : 60) {
+            powerDetails = PowerDetailsReader.read()
+            powerDetailsAt = now
+        }
+        if open || powerNeeds.details { s.powerDetails = powerDetails }
+        if open {
+            s.powerHistory = powerHistory
+            // Apps every third second (a pass over every process is the details' largest cost;
+            // the list averages several passes anyway).
+            if powerApps == nil || powerAppsTick % 3 == 0 { powerApps = s.energy ?? energy.sample(top: 6, totals: true) }
+            powerAppsTick += 1
+            s.powerApps = powerApps
+            s.energyMeasuring = energy.measuring
+        } else {
+            powerApps = nil
+            powerAppsTick = 0
+        }
+        s.powerBar = settledPowerBar(reading, powerDetails)
+    }
+
+    /// The menu bar's figures: each keeps its shown value until the reading really moves.
+    private func settledPowerBar(_ r: PowerReading, _ d: PowerDetails?) -> [StatsElement: Double] {
+        let values: [(StatsElement, Double?, Double)] = [
+            (.powerIn, r.onAC ? r.adapter : nil, 0.15),
+            (.powerBattery, r.battery.map { abs($0) < 0.3 ? 0 : $0 }, 0.15),
+            (.powerSystem, r.system, 0.15),
+            (.powerCPU, r.components[.cpu], 0.15),
+            (.powerGPU, r.components[.gpu], 0.15),
+            (.powerMemory, r.components[.memory], 0.15),
+            (.powerDisplay, r.components[.display], 0.15),
+            (.powerANE, r.components[.ane], 0.15),
+            (.batteryVolts, r.batteryVolts, 0.02),
+            (.batteryAmps, r.batteryAmps.map { abs($0) < 0.02 ? 0 : $0 }, 0.04),
+            (.adapterRated, r.onAC ? d?.adapterWatts.map(Double.init) : nil, 0),
+            (.cycleCount, d?.cycleCount.map(Double.init), 0),
+        ]
+        var out: [StatsElement: Double] = [:]
+        for (e, v, step) in values {
+            let shown = PowerMath.settle(shown: powerShown[e], reading: v, step: step)
+            powerShown[e] = shown
+            if let shown { out[e] = shown }
+        }
+        return out
+    }
+
+    /// Energy-model and power reads since launch (debug).
+    func powerReads(_ completion: @escaping (Int, Int) -> Void) {
+        queue.async { let v = (self.energyModel.reads, PowerSampler.reads); DispatchQueue.main.async { completion(v.0, v.1) } }
     }
 
     private func readSensors(full: Bool) -> SensorReadings? {

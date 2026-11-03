@@ -47,6 +47,8 @@ if let i = trioArgs.firstIndex(of: "--trio-cpu"), i + 1 < trioArgs.count {
     TrioProbe.cpu(seconds: Double(trioArgs[i + 1]) ?? 60, detail: trioArgs.contains("--detail"))
     exit(0)
 }
+// Power item checks (see PowerProbe): no status items, no prompts.
+if let status = PowerProbe.handle(trioArgs) { exit(status) }
 // Headless video-download checks (--video-download, --ytdlp-install, --render-downloads).
 if let status = VideoDownloadCLI.handle(CommandLine.arguments) { exit(status) }
 // Never start the menu bar app from a bare build product (`swift build` / `swift run`): without
