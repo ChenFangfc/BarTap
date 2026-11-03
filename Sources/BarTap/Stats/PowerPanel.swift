@@ -483,6 +483,31 @@ final class PowerFlowDiagramView: NSView {
 
     /// Debug: how many dots are moving.
     var movingDots: Int { tracks.values.reduce(0) { $0 + $1.count } }
+
+    // MARK: Promo film
+
+    /// Points at the flow from `from` to `to`, as the pointer would (the film's close-up).
+    func promoHover(from: String, to: String) {
+        hover = geo.bands.firstIndex { $0.link.from.rawValue == from && $0.link.to.rawValue == to }.map { .band($0) }
+    }
+
+    /// The flows as drawn (view coordinates, y down) with their dots' color, size and speed, so
+    /// the film can move the dots the way Core Animation does here.
+    func promoBands(dark: Bool) -> [[String: Any]] {
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+        return geo.bands.map { b in
+            var hex = "#808080"
+            appearance.performAsCurrentDrawingAppearance {
+                if let c = PowerColors.of(particleNode(b.link)).usingColorSpace(.sRGB) {
+                    hex = String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
+                }
+            }
+            let thickness = b.bottom0 - b.top0
+            return ["from": b.link.from.rawValue, "to": b.link.to.rawValue, "x0": b.x0, "top0": b.top0, "bottom0": b.bottom0,
+                    "x1": b.x1, "top1": b.top1, "bottom1": b.bottom1, "color": hex, "radius": Self.dotRadius(thickness),
+                    "speed": Self.speeds[Self.speedTier(b.link.watts)], "watts": b.link.watts]
+        }
+    }
 }
 
 // MARK: - The last two minutes
@@ -851,6 +876,27 @@ final class PowerPanel: StatsPanel {
 
     /// For renders (promo, debug): dots drawn in place.
     func drawStill() { diagram.staticParticles = true }
+
+    /// The film's close-up: one flow pointed at.
+    func promoHover(from: String, to: String) { diagram.promoHover(from: from, to: to) }
+
+    /// Where things are, for the film (points, y down from the panel's top): the panel, the diagram
+    /// and its flows, and each section the film points at.
+    func promoLayout(dark: Bool) -> [String: Any] {
+        layoutSubtreeIfNeeded()
+        func top(_ v: NSView) -> [String: CGFloat] {
+            let f = v.convert(v.bounds, to: self)
+            return ["x": f.minX, "y": bounds.height - f.maxY, "w": f.width, "h": f.height]
+        }
+        let tileRow = PowerTilesView.tileHeight + PowerTilesView.gap
+        var tilesRows: [[String: CGFloat]] = []
+        if hasBattery {
+            let t = top(tiles)
+            for r in 0..<3 { tilesRows.append(["x": t["x"]!, "y": t["y"]! + CGFloat(r) * tileRow, "w": t["w"]!, "h": PowerTilesView.tileHeight]) }
+        }
+        return ["size": ["w": bounds.width, "h": bounds.height], "diagram": top(diagram), "history": top(history),
+                "tiles": tilesRows, "apps": top(apps), "bands": diagram.promoBands(dark: dark)]
+    }
 
     /// Debug: how many dots are moving in the diagram.
     var movingDots: Int { diagram.movingDots }

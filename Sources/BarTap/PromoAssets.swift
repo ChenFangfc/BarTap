@@ -152,6 +152,10 @@ enum PromoAssets {
         if charging {
             s.battery = BatteryInfo(percent: 54, charging: true, onAC: true, charged: false, minutesRemaining: 72, cycles: 132, healthPercent: 97,
                                     temperature: 33, voltage: 12.61, amperage: 2.89, adapterWatts: 96, condition: "Normal")
+            // The battery dropdown's own flow and apps, at the same moment.
+            s.power = PowerFlow(adapter: p.adapter, system: p.system, battery: p.battery, display: p.components[.display], source: .smc)
+            s.barWatts = p.battery
+            s.energy = s.powerApps
         }
     }
 
@@ -202,9 +206,11 @@ enum PromoAssets {
         let clockDate = Calendar(identifier: .gregorian).date(from: c) ?? Date()
         let items: [(StatsModule, [StatsElement])] = [(.cpu, [.graph, .percent]), (.memory, [.pie, .percent]), (.disk, [.pie, .percent]),
                                                       (.network, [.rates]), (.sensors, [.temperature]), (.time, [.clock]),
-                                                      (.battery, [.battery, .percent]), (.gpu, [.graph, .percent]), (.ai, [.aiTokensCost])]
+                                                      (.battery, [.battery, .percent]), (.gpu, [.graph, .percent]), (.ai, [.aiTokensCost]),
+                                                      (.power, [.powerIcon, .powerTwo])]
         for step in 0..<12 {
-            let s = sampleSnapshot(step: step)
+            var s = sampleSnapshot(step: step)
+            samplePower(&s, step: step, charging: true)
             for (m, elements) in items {
                 let w = StatsRenderer.width(m, elements, o)
                 let img = StatsRenderer.bitmap(width: w, scale: 6) { r in StatsRenderer.drawContent(m, elements, s, o, r, now: clockDate) }
@@ -279,7 +285,57 @@ enum PromoAssets {
                 capture(panel, dark: dark, scale: 2, to: dir.appendingPathComponent("panel_\(name)_\(dark ? "dark" : "light").png"))
             }
         }
+        // The Chinese film's Power item (its tags are words).
+        Loc.language = .zhHans
+        for step in 0..<12 {
+            var s = sampleSnapshot(step: step)
+            samplePower(&s, step: step, charging: true)
+            let e: [StatsElement] = [.powerIcon, .powerTwo]
+            let img = StatsRenderer.bitmap(width: StatsRenderer.width(.power, e, o), scale: 6) { r in StatsRenderer.drawContent(.power, e, s, o, r, now: clockDate) }
+            write(img, dir.appendingPathComponent("items/power_zh_\(step).png"))
+        }
+        Loc.language = .system
+        exportFilm(to: dir.appendingPathComponent("film"), options: o)
         print("exported promo assets to \(dir.path)")
+    }
+
+    /// The film's details, in English and Chinese (light): Power without dots (the film moves
+    /// them, from the flows' geometry in power_<lang>.json), Power pointing at the CPU's flow, and
+    /// the panels of its montage.
+    static func exportFilm(to dir: URL, options o: StatsRenderer.Options) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var charging = sampleSnapshot(step: 3)
+        samplePower(&charging, step: 3, charging: true)
+        let scratch = NSTemporaryDirectory() + "bartap-film-\(UUID().uuidString).plist"
+        let settings = Settings(defaults: UserDefaults(suiteName: scratch)!)
+        defer {
+            CFPreferencesAppSynchronize(scratch as CFString)
+            try? FileManager.default.removeItem(atPath: scratch)
+        }
+        for language in [AppLanguage.en, .zhHans] {
+            Loc.language = language
+            let tag = language == .en ? "en" : "zh"
+            let power = PowerPanel(hasBattery: true, interval: 1)
+            power.update(charging, o)
+            power.compact()
+            capture(power, dark: false, scale: 2, to: dir.appendingPathComponent("panel_power_\(tag).png"))
+            if let data = try? JSONSerialization.data(withJSONObject: power.promoLayout(dark: false), options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: dir.appendingPathComponent("power_\(tag).json"))
+            }
+            power.promoHover(from: "mac", to: "cpu")
+            capture(power, dark: false, scale: 2, to: dir.appendingPathComponent("panel_power_hover_\(tag).png"))
+            let ai = AIPanel(settings: settings, prices: promoPrices, agents: [.claudeCode, .codex, .geminiCLI])
+            ai.clock = { promoNow }
+            let montage: [(String, StatsPanel)] = [("cpu", CPUPanel()), ("memory", MemoryPanel()), ("network", NetworkPanel()), ("ai", ai),
+                                                   ("battery", BatteryPanel()),
+                                                   ("bluetooth", BluetoothPanel(state: charging.bluetooth, updated: promoNow, access: .allowed))]
+            for (name, panel) in montage {
+                panel.update(charging, o)
+                panel.compact()
+                capture(panel, dark: false, scale: 2, to: dir.appendingPathComponent("panel_\(name)_\(tag).png"))
+            }
+        }
+        Loc.language = .system
     }
 
     /// Renders a view at `scale` on a solid menu-colored background (an offscreen material view

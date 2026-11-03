@@ -8,7 +8,7 @@ import AppKit
 import CoreImage
 
 let W: CGFloat = 1920, H: CGFloat = 1080, FPS = 30.0
-let duration = 37.0
+let duration = 49.0
 let root = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
 /// "frames" (default), a time in seconds (one still for review), or "cues" (sound cues as JSON).
 let mode = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "frames"
@@ -27,13 +27,20 @@ let S: [String: String] = zh ? [
     "ai": "AI 编程用量，也一眼看清。", "ai2": "Claude Code、Codex、Gemini CLI 等：token、按 API 价折算的费用、套餐额度",
     "all": "菜单栏管理该有的，都有。", "all2": "就是不会抽动。",
     "search": "搜索任意图标", "shelf": "刘海下方的图标架", "rules": "自动规则与快捷键", "clean": "一键干净菜单栏",
-    "arrange": "拖动排列图标", "sound": "音量与蓝牙", "power": "电池功率流向", "video": "视频下载",
+    "arrange": "拖动排列图标", "sound": "音量与蓝牙", "power": "用电明细", "video": "视频下载",
     "peek": "悬停看详情", "lid": "合盖不睡眠",
     "lidT": "合上盖子，AI 照样跑。", "lidT2": "合盖不睡眠：长任务、整夜跑，都不会中断",
     "lidOn": "合盖不睡眠 · 已开启",
     "term0": "› AI 代理：重构 12 个文件…", "term1": "✓ 128 项测试全部通过", "term2": "› 继续：更新文档，然后提交…",
     "dl": "存下视频，交给 AI 总结。", "dl2": "粘贴链接，选清晰度，或者只要音频",
     "ask": "总结一下这个视频", "reply": "10 分钟短片：一只大兔子、三个捣蛋鬼，和一场漂亮的反击。",
+    "watt": "每一瓦电去了哪，一目了然。", "watt2": "充电器输入、电池充放，CPU、GPU、内存、屏幕各用多少",
+    "c1": "每一瓦的去向", "c1s": "充电器 → 本机和电池 → CPU、GPU、内存、屏幕",
+    "c2": "最近两分钟", "c2s": "各部件逐秒叠加，电池充电也在里面",
+    "c3": "电池状态，实时测量", "c3s": "电压、电流、温度、容量、健康度、循环次数",
+    "c4": "充电器参数", "c4s": "额定功率、协商电压电流、此刻输入",
+    "c5": "每个 App 的耗电", "c5s": "当前功率，以及启动以来的累计用电",
+    "deep": "每一项，都有这样的详情页。", "deep2": "指针停一下就展开，点一下就固定",
     "idle": "空闲时 CPU", "mem": "内存", "fakes": "被拦截的点击",
     "end2": "免费 · macOS 13+ · github.com/ChenFangfc/BarTap",
 ] : [
@@ -46,13 +53,20 @@ let S: [String: String] = zh ? [
     "ai": "Your AI coding usage, too.", "ai2": "Claude Code, Codex, Gemini CLI and more: tokens, cost at API prices, plan limits",
     "all": "Everything a menu bar manager should do.", "all2": "Without the twitching.",
     "search": "Search any icon", "shelf": "Shelf below the notch", "rules": "Rules & hotkeys", "clean": "Clean menu bar",
-    "arrange": "Drag to arrange", "sound": "Volume & Bluetooth", "power": "Battery power flow", "video": "Video downloads",
+    "arrange": "Drag to arrange", "sound": "Volume & Bluetooth", "power": "Power, watt by watt", "video": "Video downloads",
     "peek": "Hover for details", "lid": "Awake, lid closed",
     "lidT": "Close the lid. Your AI keeps going.", "lidT2": "Stay awake with the lid closed: long runs and overnight jobs keep running",
     "lidOn": "Awake with lid closed · On",
     "term0": "› agent: refactoring 12 files…", "term1": "✓ all 128 tests passed", "term2": "› next: docs, then commit…",
     "dl": "Save a video. Let AI sum it up.", "dl2": "Paste a link, pick a quality, or audio only",
     "ask": "Sum up this video", "reply": "A 10-minute short: one big rabbit, three bullies and one sweet comeback.",
+    "watt": "See where every watt goes.", "watt2": "What the charger delivers, what the battery takes, what CPU, GPU, memory and display use",
+    "c1": "Where every watt goes", "c1s": "Charger → Mac and battery → CPU, GPU, memory, display",
+    "c2": "The last two minutes", "c2s": "Part by part, the battery's charge on top",
+    "c3": "Your battery, measured live", "c3s": "Voltage, current, temperature, capacity, health, cycles",
+    "c4": "Your charger", "c4s": "Its rating, the negotiated voltage, what comes in now",
+    "c5": "Every app's power", "c5s": "Watts right now, energy used since it started",
+    "deep": "Every item has details like this.", "deep2": "Rest the pointer to peek. Click to keep them open.",
     "idle": "CPU when idle", "mem": "memory", "fakes": "clicks blocked",
     "end2": "Free · macOS 13+ · github.com/ChenFangfc/BarTap",
 ]
@@ -92,6 +106,15 @@ let toggleRevealed = asset("promo/assets/items/toggle_revealed.png")
 let cpuPanel = asset("promo/assets/panel_cpu_light.png")
 let aiPanel = asset("promo/assets/panel_ai_light.png")
 let downloadPanel = asset("promo/assets/downloads/downloads_preview_\(zh ? "zh" : "en")_light.png")
+/// The Power details without their dots (the film moves them along the real flows), and pointing
+/// at the CPU's flow; their layout and flows (points, y down from the panel's top).
+let lang = zh ? "zh" : "en"
+let powerPanel = asset("promo/assets/film/panel_power_\(lang).png")
+let powerHover = asset("promo/assets/film/panel_power_hover_\(lang).png")
+let powerLayout = try! JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("promo/assets/film/power_\(lang).json"))) as! [String: Any]
+let montagePanels = ["cpu", "memory", "network", "power", "ai", "battery", "bluetooth"].map { name in
+    name == "power" ? powerPanel : asset("promo/assets/film/panel_\(name)_\(lang).png")
+}
 
 func symbol(_ name: String, _ size: CGFloat) -> NSImage {
     let cfg = NSImage.SymbolConfiguration(pointSize: size, weight: .regular)
@@ -577,6 +600,151 @@ func drawDownloadScene(t: Double, alpha a: Double) {
     }
 }
 
+// MARK: - Power scene
+
+/// One flow of the Power details: its centre line (a cubic, as the app draws it) and its dots.
+struct Flow {
+    let p0: CGPoint, c1: CGPoint, c2: CGPoint, p3: CGPoint
+    let color: NSColor, radius: CGFloat, speed: CGFloat, from: String, to: String
+    /// Arc length at 64 even steps of the curve parameter, to move the dots at a steady speed
+    /// (Core Animation's paced mode in the app).
+    let lengths: [CGFloat]
+    var length: CGFloat { lengths.last ?? 1 }
+
+    init(_ d: [String: Any], offset: CGPoint) {
+        func v(_ k: String) -> CGFloat { CGFloat((d[k] as? NSNumber)?.doubleValue ?? 0) }
+        let x0 = v("x0") + offset.x, x1 = v("x1") + offset.x
+        let m0 = (v("top0") + v("bottom0")) / 2 + offset.y, m1 = (v("top1") + v("bottom1")) / 2 + offset.y
+        let xm = (x0 + x1) / 2
+        let a = CGPoint(x: x0, y: m0), b = CGPoint(x: xm, y: m0), c = CGPoint(x: xm, y: m1), e = CGPoint(x: x1, y: m1)
+        p0 = a; c1 = b; c2 = c; p3 = e
+        let hex = (d["color"] as? String ?? "#808080").dropFirst()
+        let n = UInt32(hex, radix: 16) ?? 0x808080
+        color = NSColor(srgbRed: CGFloat((n >> 16) & 0xFF) / 255, green: CGFloat((n >> 8) & 0xFF) / 255, blue: CGFloat(n & 0xFF) / 255, alpha: 1)
+        radius = v("radius"); speed = v("speed")
+        from = d["from"] as? String ?? ""; to = d["to"] as? String ?? ""
+        var acc: [CGFloat] = [0], last = a
+        for i in 1...64 {
+            let u = CGFloat(i) / 64, w = 1 - u
+            let p = CGPoint(x: w * w * w * a.x + 3 * w * w * u * b.x + 3 * w * u * u * c.x + u * u * u * e.x,
+                            y: w * w * w * a.y + 3 * w * w * u * b.y + 3 * w * u * u * c.y + u * u * u * e.y)
+            acc.append(acc[acc.count - 1] + hypot(p.x - last.x, p.y - last.y))
+            last = p
+        }
+        lengths = acc
+    }
+
+    func point(at u: CGFloat) -> CGPoint {
+        let w = 1 - u
+        return CGPoint(x: w * w * w * p0.x + 3 * w * w * u * c1.x + 3 * w * u * u * c2.x + u * u * u * p3.x,
+                       y: w * w * w * p0.y + 3 * w * w * u * c1.y + 3 * w * u * u * c2.y + u * u * u * p3.y)
+    }
+
+    /// Where a dot is after travelling `fraction` of the way (by length).
+    func point(alongLength fraction: CGFloat) -> CGPoint {
+        let target = fraction * length
+        var i = 1
+        while i < lengths.count - 1 && lengths[i] < target { i += 1 }
+        let a = lengths[i - 1], b = lengths[i]
+        let u = (CGFloat(i - 1) + (b > a ? (target - a) / (b - a) : 0)) / 64
+        return point(at: u)
+    }
+}
+
+/// Panel points of the diagram's flows (the JSON's flows are in the diagram's own coordinates).
+let powerFlows: [Flow] = {
+    let dg = powerLayout["diagram"] as? [String: Any] ?? [:]
+    let off = CGPoint(x: CGFloat((dg["x"] as? NSNumber)?.doubleValue ?? 0), y: CGFloat((dg["y"] as? NSNumber)?.doubleValue ?? 0))
+    return (powerLayout["bands"] as? [[String: Any]] ?? []).map { Flow($0, offset: off) }
+}()
+let powerSize: CGSize = {
+    let sz = powerLayout["size"] as? [String: Any] ?? [:]
+    return CGSize(width: CGFloat((sz["w"] as? NSNumber)?.doubleValue ?? 392), height: CGFloat((sz["h"] as? NSNumber)?.doubleValue ?? 709))
+}()
+/// A section's vertical middle in panel points ("diagram", "history", "apps", or tile row 0…2).
+func powerSection(_ key: String, row: Int = 0) -> CGFloat {
+    let r: [String: Any]?
+    if key == "tiles" { r = (powerLayout["tiles"] as? [[String: Any]]).flatMap { row < $0.count ? $0[row] : nil } } else { r = powerLayout[key] as? [String: Any] }
+    let y = CGFloat((r?["y"] as? NSNumber)?.doubleValue ?? 0), h = CGFloat((r?["h"] as? NSNumber)?.doubleValue ?? 0)
+    return y + h / 2
+}
+
+/// A panel image as a details window: a white card with a shadow, the top `crop` of the panel at
+/// `scale`, its top-left corner at `origin`.
+func panelCard(_ img: NSImage, origin: CGPoint, scale: CGFloat, crop: CGFloat, alpha: Double, radius: CGFloat = 14) {
+    guard alpha > 0.001 else { return }
+    let w = img.size.width * scale, h = img.size.height * scale * crop
+    let r = NSRect(x: origin.x, y: origin.y, width: w, height: h)
+    let gc = NSGraphicsContext.current!.cgContext
+    gc.saveGState()
+    gc.setAlpha(CGFloat(alpha))
+    gc.beginTransparencyLayer(auxiliaryInfo: nil)
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.16)
+    shadow.shadowBlurRadius = 40
+    shadow.shadowOffset = NSSize(width: 0, height: -14)
+    shadow.set()
+    let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
+    NSColor.white.setFill()
+    path.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGraphicsContext.saveGraphicsState()
+    path.addClip()
+    // The image's top `crop` (it is drawn flipped, top first).
+    let src = NSRect(x: 0, y: img.size.height * (1 - crop), width: img.size.width, height: img.size.height * crop)
+    img.draw(in: r, from: src, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    NSGraphicsContext.restoreGraphicsState()
+    gc.endTransparencyLayer()
+    gc.restoreGState()
+}
+
+/// The Power details' dots, moving as the app moves them: evenly spaced along each flow, at the
+/// flow's speed, fading in and out at its ends. Flows other than `lit` (when given) dim.
+func powerDots(t: Double, since start: Double, origin: CGPoint, scale: CGFloat, clipHeight: CGFloat, alpha: Double, lit: String? = nil, litAmount: Double = 0) {
+    guard alpha > 0.001 else { return }
+    NSGraphicsContext.saveGraphicsState()
+    NSRect(x: origin.x, y: origin.y, width: powerSize.width * scale, height: clipHeight).clip()
+    for f in powerFlows {
+        let count = max(2, Int(f.length / 26))
+        let duration = Double(f.length / max(f.speed, 1))
+        let dim = lit.map { "\(f.from)>\(f.to)" == $0 ? 1 : 1 - 0.8 * litAmount } ?? 1
+        for k in 0..<count {
+            let phase = ((t - start) / duration + Double(k) / Double(count)).truncatingRemainder(dividingBy: 1)
+            let u = phase < 0 ? phase + 1 : phase
+            let fadeA = min(u / 0.14, 1, (1 - u) / 0.14)
+            let p = f.point(alongLength: CGFloat(u))
+            let c = CGPoint(x: origin.x + p.x * scale, y: origin.y + p.y * scale)
+            let r = f.radius * scale
+            f.color.withAlphaComponent(CGFloat(alpha * fadeA * dim)).setFill()
+            NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)).fill()
+        }
+    }
+    NSGraphicsContext.restoreGraphicsState()
+}
+
+/// A callout: a dot on the panel's edge, a hairline to the text, a title and a line under it.
+func callout(_ title: String, _ sub: String, from p: CGPoint, textAt q: CGPoint, alpha: Double) {
+    guard alpha > 0.001 else { return }
+    let a = CGFloat(alpha)
+    let line = NSBezierPath()
+    line.move(to: p)
+    line.line(to: NSPoint(x: q.x - 60, y: q.y))
+    line.line(to: NSPoint(x: q.x - 18, y: q.y))
+    line.lineWidth = 2
+    ink.withAlphaComponent(0.28 * a).setStroke()
+    line.stroke()
+    blue.withAlphaComponent(a).setFill()
+    NSBezierPath(ovalIn: NSRect(x: p.x - 7, y: p.y - 7, width: 14, height: 14)).fill()
+    NSColor.white.withAlphaComponent(a).setFill()
+    NSBezierPath(ovalIn: NSRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6)).fill()
+    let t = NSAttributedString(string: title, attributes: [.font: NSFont.systemFont(ofSize: zh ? 34 : 36, weight: .semibold),
+                                                           .foregroundColor: ink.withAlphaComponent(a), .kern: zh ? 0 : -0.4])
+    t.draw(at: CGPoint(x: q.x, y: q.y - t.size().height + 4))
+    let u = NSAttributedString(string: sub, attributes: [.font: NSFont.systemFont(ofSize: 24, weight: .regular), .foregroundColor: gray.withAlphaComponent(a)])
+    u.draw(at: CGPoint(x: q.x, y: q.y + 8))
+}
+
 // MARK: - The mark (drawn progressively)
 
 func drawMark(center c: CGPoint, width w: CGFloat, progress p: Double, alpha: Double, weight: CGFloat = 48) {
@@ -618,7 +786,7 @@ func drawMark(center c: CGPoint, width w: CGFloat, progress p: Double, alpha: Do
 // 120 BPM: every event sits on the grid (beat 0.5 s, eighth 0.25 s, sixteenth 0.125 s) so the music
 // can hit it. Two short openers, then one idea every two bars (4 s).
 let beat = 0.5
-let s1 = 0.0, s2 = 2.5, s3 = 5.0, s4 = 8.0, s5 = 12.0, s6 = 16.0, sLid = 20.0, sVideo = 24.0, s7 = 28.0, s8 = 32.0
+let s1 = 0.0, s2 = 2.5, s3 = 5.0, s4 = 8.0, s5 = 12.0, s6 = 16.0, sLid = 20.0, sVideo = 24.0, sPower = 28.0, sDeep = 36.0, s7 = 40.0, s8 = 44.0
 let land = s4                          // the mark settles into the bar
 let collapseAt = s4 + 0.75, tap1 = s4 + 2.0, tap2 = s4 + 3.0
 /// The pointer reaches CPU, rests (a ring fills for the real 0.5 s), and its details open: no click.
@@ -629,6 +797,15 @@ let termTimes = (0..<3).map { sLid + 0.25 + 0.25 * Double($0) }
 let lidPill = sLid + 1.0, lidCloseAt = sLid + 1.5
 /// Download scene: click Download, the file lands, goes to the AI, which answers.
 let dlClick = sVideo + 0.75, dlDone = sVideo + 1.75, aiSend = sVideo + 2.0, aiReply = sVideo + 2.5
+/// Power: the stats come back with Power beside the clock; the pointer rests on it and its details
+/// drop, dots moving along the flows; it points at the CPU's flow; then the panel comes forward
+/// whole and its parts are named, one per eighth.
+let powerItems = (0..<4).map { sPower + 0.125 + 0.125 * Double($0) }
+let pArrive = sPower + 0.75, pRest = sPower + 1.25, pOpen = sPower + 1.75
+let pPoint = sPower + 2.5, pHover = sPower + 3.0, pUnhover = sPower + 3.75, pLift = sPower + 4.0
+let calloutTimes = (0..<5).map { sPower + 4.75 + 0.25 * Double($0) }
+/// Details montage: the Power panel takes its place among the others, which arrive in pairs.
+let deepTimes = (0..<3).map { sDeep + 0.5 + 0.25 * Double($0) }
 let endAt = s8 + 2.0
 /// S1: when each third-party icon appears: accelerating, on a 16th-note grid.
 let popTimes: [Double] = {
@@ -802,10 +979,15 @@ func frame(_ t: Double) {
     }
 
     // ---- Download scene: save a video, hand it to your AI. ---------------------------------------
-    if t >= sVideo - 0.1, t < s7 + 0.3 {
-        let a = window(t, sVideo, s7, 0.3)
+    if t >= sVideo - 0.1, t < sPower + 0.3 {
+        let a = window(t, sVideo, sPower, 0.3)
         drawDownloadScene(t: t, alpha: a)
-        caption("dl", "dl2", t: t, a: sVideo + 0.3, b: s7)
+        caption("dl", "dl2", t: t, a: sVideo + 0.3, b: sPower)
+    }
+
+    // ---- Power: where every watt goes, then the whole panel, named part by part. ---------------
+    if t >= sPower - 0.1, t < s7 + 0.1 {
+        drawPowerScene(t)
     }
 
     // ---- S7: feature cards. --------------------------------------------------------------------
@@ -845,7 +1027,7 @@ func frame(_ t: Double) {
 
     // ---- S8: numbers, then the end card. -------------------------------------------------------
     if t >= s8 {
-        let nums: [(String, String)] = [("0.02%", "idle"), ("~40 MB", "mem"), ("0", "fakes")]
+        let nums: [(String, String)] = [("0.02%", "idle"), ("~50 MB", "mem"), ("0", "fakes")]
         let fadeNums = 1 - prog(t, endAt - 0.4, endAt)
         for (i, (big, key)) in nums.enumerated() {
             let a0 = numberTimes[i]
@@ -858,6 +1040,103 @@ func frame(_ t: Double) {
         drawMark(center: CGPoint(x: W / 2, y: 440), width: 300, progress: ease(prog(t, endAt, endAt + 1.0)), alpha: endA, weight: 46)
         text("BarTap", size: 76, weight: .bold, center: CGPoint(x: W / 2, y: 640), alpha: easeOut(prog(t, endAt + 0.3, endAt + 0.8)), tracking: -1.5)
         text(S["end2"] ?? "", size: 28, weight: .regular, color: gray, center: CGPoint(x: W / 2, y: 712), alpha: easeOut(prog(t, endAt + 0.6, endAt + 1.1)))
+    }
+}
+
+/// The Power scene and the details montage after it (see the timeline).
+func drawPowerScene(_ t: Double) {
+    let gap = 7 * k
+    // The bar: stats as before, Power beside the clock.
+    let barA = easeOut(prog(t, sPower, sPower + 0.4)) * (1 - prog(t, pLift, pLift + 0.4))
+    var right = clockLeft - 12
+    var powerRect = NSRect.zero
+    let step = Int((t - sPower) * 2)
+    if barA > 0.001 { drawBar(alpha: barA); drawClock(alpha: barA) }
+    for (i, n) in ["power", "network", "cpu"].enumerated() {
+        let appear = i == 0 ? powerItems[3] : powerItems[i]
+        let a = barA * easeOut(prog(t, appear, appear + 0.35))
+        let img = item(n == "power" && zh ? "power_zh" : n, step + i)
+        let left = right - img.size.width * k
+        if n == "power" { powerRect = NSRect(x: left, y: barRect.minY, width: right - left, height: barRect.height) }
+        if a > 0.001 { drawItem(img, right: right, alpha: a, dy: CGFloat(14 * (1 - a))) }
+        right = left - gap
+    }
+    if barA > 0.001 { drawItem(toggleCollapsed, right: right, alpha: barA) }
+
+    // The details: dropped under the item (header and diagram, large), then forward and whole.
+    let cropA = (powerSection("diagram") + 92 + 8) / powerSize.height   // header + diagram + its caption
+    let scaleA: CGFloat = 1.6
+    let wA = powerSize.width * scaleA
+    let originA = CGPoint(x: min(powerRect.midX - wA / 2, W - wA - 40), y: barRect.maxY + 10)
+    let originB = CGPoint(x: 190, y: 80), scaleB: CGFloat = 1.3
+    // The montage row: seven panels, Power in the middle.
+    let m: CGFloat = 0.72, rowGap: CGFloat = 22, rowTop: CGFloat = 128
+    let widths = montagePanels.map { $0.size.width * m }
+    let rowLeft = (W - widths.reduce(0, +) - rowGap * CGFloat(widths.count - 1)) / 2
+    let slotX = (0..<widths.count).map { i in rowLeft + widths[..<i].reduce(0, +) + rowGap * CGFloat(i) }
+
+    let unroll = ease(prog(t, pOpen, pOpen + 0.35))
+    let lift = ease(prog(t, pLift, pLift + 0.6))
+    let settle = ease(prog(t, sDeep, sDeep + 0.6))
+    let out = 1 - prog(t, s7 - 0.4, s7)
+    var origin = CGPoint(x: lerp(originA.x, originB.x, lift), y: lerp(originA.y, originB.y, lift))
+    var scale = lerp(scaleA, scaleB, lift)
+    let crop = lift > 0 ? lerp(cropA, 1, lift) : cropA * max(unroll, 0.02)
+    if settle > 0 {
+        origin = CGPoint(x: lerp(origin.x, slotX[3], settle), y: lerp(origin.y, rowTop, settle))
+        scale = lerp(scale, m, settle)
+    }
+    let cardA = (t < pLift ? min(1, unroll * 1.4) : 1) * out
+    if t >= pOpen {
+        let hover = ease(prog(t, pHover, pHover + 0.2)) * (1 - ease(prog(t, pUnhover, pUnhover + 0.2)))
+        panelCard(powerPanel, origin: origin, scale: scale, crop: crop, alpha: cardA)
+        if hover > 0.001 { panelCard(powerHover, origin: origin, scale: scale, crop: crop, alpha: cardA * hover) }
+        powerDots(t: t, since: pOpen, origin: origin, scale: scale, clipHeight: powerSize.height * scale * crop, alpha: cardA,
+                  lit: "mac>cpu", litAmount: hover)
+    }
+
+    // The pointer: rests on Power (the ring fills), then points at the CPU's flow.
+    let cpuFlow = powerFlows.first { $0.from == "mac" && $0.to == "cpu" }
+    let flowPoint = cpuFlow.map { f -> CGPoint in let p = f.point(at: 0.55); return CGPoint(x: originA.x + p.x * scaleA, y: originA.y + p.y * scaleA) }
+        ?? CGPoint(x: originA.x + 200, y: originA.y + 200)
+    let cA = window(t, pArrive, pUnhover + 0.2, 0.25)
+    let arrive = ease(prog(t, pArrive, pRest))
+    var pointer = CGPoint(x: lerp(1500, powerRect.midX + 4, arrive), y: lerp(560, powerRect.midY + 2, arrive))
+    let toFlow = ease(prog(t, pPoint, pHover - 0.05))
+    pointer = CGPoint(x: lerp(pointer.x, flowPoint.x, toFlow), y: lerp(pointer.y, flowPoint.y, toFlow))
+    dwell(at: pointer, progress: prog(t, pRest, pOpen), alpha: cA * (1 - prog(t, pOpen, pOpen + 0.25)))
+    cursor(at: pointer, alpha: cA)
+    caption("watt", "watt2", t: t, a: sPower + 0.3, b: pLift + 0.2)
+
+    // The whole panel, its parts named on the right.
+    if t >= pLift {
+        let names: [(String, String, CGFloat, CGFloat)] = [
+            ("c1", "c1s", powerSection("diagram"), 278), ("c2", "c2s", powerSection("history"), 467),
+            ("c3", "c3s", (powerSection("tiles", row: 0) + powerSection("tiles", row: 1)) / 2, 600),
+            ("c4", "c4s", powerSection("tiles", row: 2), 712), ("c5", "c5s", powerSection("apps"), 874),
+        ]
+        let edge = originB.x + powerSize.width * scaleB + 10
+        let gone = 1 - prog(t, sDeep - 0.25, sDeep + 0.1)
+        for (i, (title, sub, y, textY)) in names.enumerated() {
+            let a = easeOut(prog(t, calloutTimes[i], calloutTimes[i] + 0.3)) * gone
+            let slide = CGFloat(24 * (1 - a))
+            callout(S[title] ?? "", S[sub] ?? "", from: CGPoint(x: edge, y: originB.y + y * scaleB), textAt: CGPoint(x: 820 + slide, y: textY), alpha: a)
+        }
+    }
+
+    // The montage: every item has details like these.
+    if t >= sDeep - 0.1 {
+        let pairs = [[2, 4], [1, 5], [0, 6]]
+        for (j, pair) in pairs.enumerated() {
+            for i in pair {
+                let a = easeOut(prog(t, deepTimes[j], deepTimes[j] + 0.35)) * out
+                guard a > 0.001 else { continue }
+                let from: CGFloat = i < 3 ? -70 : 70
+                panelCard(montagePanels[i], origin: CGPoint(x: slotX[i] + from * CGFloat(1 - a), y: rowTop + CGFloat(18 * (1 - a))),
+                          scale: m, crop: 1, alpha: a, radius: 12)
+            }
+        }
+        caption("deep", "deep2", t: t, a: sDeep + 0.5, b: s7)
     }
 }
 
@@ -892,10 +1171,15 @@ if mode == "cues" {
     for (i, p) in termTimes.enumerated() { cue(p, "item", i) }
     cue(lidPill, "tap", 0); cue(lidCloseAt, "hide")
     cue(dlClick, "click"); cue(dlDone, "item", 4); cue(aiSend, "fly"); cue(aiReply, "tap", 1)
+    for (i, p) in powerItems.enumerated() { cue(p, "item", i) }
+    cue(pOpen, "click"); cue(pHover, "tap", 0); cue(pLift, "fly")
+    for (i, p) in calloutTimes.enumerated() { cue(p, "card", i) }
+    cue(sDeep, "land")
+    for (i, p) in deepTimes.enumerated() { cue(p, "pop", 10 + i) }
     for (i, p) in cardTimes.enumerated() { cue(p, "card", i) }
     for (i, p) in numberTimes.enumerated() { cue(p, "number", i) }
     cue(endAt, "end")
-    let json: [String: Any] = ["duration": duration, "beat": beat, "scenes": [s1, s2, s3, s4, s5, s6, sLid, sVideo, s7, s8], "cues": cues]
+    let json: [String: Any] = ["duration": duration, "beat": beat, "scenes": [s1, s2, s3, s4, s5, s6, sLid, sVideo, sPower, sDeep, s7, s8], "cues": cues]
     FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]))
 } else if let still = Double(mode) {
     render(still)

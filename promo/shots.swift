@@ -51,7 +51,7 @@ func card(_ r: NSRect, radius: CGFloat, dark: Bool, fill: NSColor, shadowBlur: C
 }
 
 // 1. A menu bar strip: the toggle and every stats module, as BarTap draws them.
-let items = ["toggle_collapsed", "cpu_3", "gpu_3", "memory_3", "disk_3", "network_3", "sensors_3", "battery_3", "ai_3", "time_3"]
+let items = ["toggle_collapsed", "cpu_3", "gpu_3", "memory_3", "disk_3", "network_3", "sensors_3", "battery_3", "power_3", "ai_3", "time_3"]
     .map { asset("items/\($0).png") }
 let gap: CGFloat = 12, pad: CGFloat = 14, barH: CGFloat = 30, margin: CGFloat = 18
 let contentW = items.reduce(0) { $0 + $1.size.width } + gap * CGFloat(items.count - 1)

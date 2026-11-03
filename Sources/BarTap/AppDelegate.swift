@@ -699,7 +699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
 
     func openShelf() {
         let panel = shelfPanel ?? ShelfPanel()
-        panel.onActivate = { [weak self] item in self?.activate(item) }
+        panel.onActivate = { [weak self] item, frame in self?.activate(item, from: frame) }
         panel.onOpenSettings = { [weak self] in self?.requestAccessibility() }
         panel.onRequestImages = { ItemImages.request() }
         panel.onClosed = { [weak self] in
@@ -746,8 +746,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, SettingsHost {
     }
 
     /// Open a menu bar icon: reveal its section if needed, then AXPress it. No pointer movement.
-    private func activate(_ item: BarItem) {
+    /// BarTap's own stats items open their details directly, hanging from where they were chosen
+    /// (`from`, global CG: the shelf's button) or else from the toggle.
+    private func activate(_ item: BarItem, from: CGRect? = nil) {
         configureGestures()
+        if item.pid == ProcessInfo.processInfo.processIdentifier, let id = item.identifier, id.hasPrefix("bartap.stats.") {
+            let toggle = bar.toggleItem?.button?.window.map { SystemQueries.cgRect(fromCocoa: $0.frame) }
+            if let anchor = from ?? toggle, stats?.showDetails(identifier: id, below: anchor) == true { return }
+        }
         let needed: RevealLevel
         switch item.section {
         case .shown: needed = .collapsed

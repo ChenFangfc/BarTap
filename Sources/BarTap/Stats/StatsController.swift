@@ -953,6 +953,16 @@ final class StatsController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Opens a stats item's details from the shelf or search (its Accessibility identifier,
+    /// "bartap.stats.cpu"), hanging from `frame` (global CG). Pressing a hidden item of our own
+    /// through Accessibility fails (-25200), so the shelf showed "Couldn't open".
+    func showDetails(identifier: String, below frame: CGRect) -> Bool {
+        let id = String(identifier.dropFirst("bartap.stats.".count))
+        guard item(for: id) != nil else { return false }
+        presenter.openPinned(id, at: frame)
+        return true
+    }
+
     /// Opens an item's details as a click on it would ("cpu", "combined"…), or "close" (debug).
     func debugShowDetails(_ id: String) {
         if id == "close" { presenter.dismiss() } else { presenter.itemClicked(id) }

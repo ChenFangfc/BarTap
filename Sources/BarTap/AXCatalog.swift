@@ -103,7 +103,7 @@ final class AXCatalog {
     /// Bundle ID and name per running app, read once on the queue: each can be a synchronous
     /// round trip to LaunchServices, which took the main thread for tens of ms per refresh (and
     /// seconds while LaunchServices was busy). Touched only on `queue`.
-    private var appInfo: [pid_t: (app: Weak<NSRunningApplication>, bundle: String, name: String, skip: Bool)] = [:]
+    private var appInfo: [pid_t: (app: Weak<NSRunningApplication>, bundle: String, name: String, skip: Bool, at: Date)] = [:]
 
     private final class Weak<T: AnyObject> {
         weak var value: T?
@@ -121,13 +121,15 @@ final class AXCatalog {
             let pid = app.processIdentifier
             seen.insert(pid)
             let entry: (bundle: String, name: String, skip: Bool)
-            if let known = appInfo[pid], known.app.value === app {
+            // A skipped app is looked at again now and then: an app can turn from background-only
+            // into one with a menu bar icon.
+            if let known = appInfo[pid], known.app.value === app, !known.skip || Date().timeIntervalSince(known.at) < 30 {
                 entry = (known.bundle, known.name, known.skip)
             } else {
                 let bundle = app.bundleIdentifier ?? "pid.\(pid)"
                 let skip = app.activationPolicy == .prohibited || bundle.hasPrefix("com.apple.WebKit.")
                 entry = (bundle, app.localizedName ?? "", skip)
-                appInfo[pid] = (Weak(app), entry.bundle, entry.name, skip)
+                appInfo[pid] = (Weak(app), entry.bundle, entry.name, skip, Date())
             }
             if !entry.skip || pid == ProcessInfo.processInfo.processIdentifier { out.append((pid, entry.bundle, entry.name)) }
         }

@@ -15,21 +15,21 @@
 
 <br>
 
-<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><img src="docs/media/bartap-preview.webp" width="100%" alt="BarTap in 37 seconds: a crowded menu bar, icons tucked behind one divider, live system stats and AI usage, staying awake with the lid closed, video downloads"></a>
+<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><img src="docs/media/bartap-preview.webp" width="100%" alt="BarTap in 49 seconds: a crowded menu bar, icons tucked behind one divider, live system stats and AI usage, staying awake with the lid closed, video downloads, where every watt goes, and the details behind every item"></a>
 
-<sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ Watch with sound (0:37)</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 中文版</b></a></sub>
+<sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ Watch with sound (0:49)</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 中文版</b></a></sub>
 
 </div>
 
 ---
 
-BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GPU, memory, disk, network, sensors, battery and a clock live in the bar, and shows how much your AI coding agents have used. Hiding never fakes a click, taps your input or warps the cursor, so the screen never twitches. Icons move only when you ask: arrange them in Settings › Layout, click Apply, and BarTap makes the ⌘-drags for you, stopping the moment you touch the mouse.
+BarTap hides the menu bar icons you don't need behind one divider, keeps CPU, GPU, memory, disk, network, sensors, battery, power and a clock live in the bar, shows where every watt goes, and shows how much your AI coding agents have used. Hiding never fakes a click, taps your input or warps the cursor, so the screen never twitches. Icons move only when you ask: arrange them in Settings › Layout, click Apply, and BarTap makes the ⌘-drags for you, stopping the moment you touch the mouse.
 
 ## Features
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/bar-dark.webp">
-  <img src="docs/media/bar-light.webp" width="100%" alt="BarTap's toggle and stats items: CPU, GPU, memory, disk, network, sensors, battery, AI usage and time">
+  <img src="docs/media/bar-light.webp" width="100%" alt="BarTap's toggle and stats items: CPU, GPU, memory, disk, network, sensors, battery, power, AI usage and time">
 </picture>
 
 **Organize**

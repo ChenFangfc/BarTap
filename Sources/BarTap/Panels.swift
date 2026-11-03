@@ -207,7 +207,8 @@ final class SearchPanel: FloatingPanel, NSSearchFieldDelegate, NSTableViewDataSo
 /// clicking one reveals its section and opens it via Accessibility. Nothing is moved, and the
 /// pointer is never touched. Real icon images need Screen Recording; until then, app icons.
 final class ShelfPanel: FloatingPanel {
-    var onActivate: ((BarItem) -> Void)?
+    /// An icon was clicked: the item and its button's frame (global CG), for anything opened from it.
+    var onActivate: ((BarItem, CGRect?) -> Void)?
     var onOpenSettings: (() -> Void)?
     var onRequestImages: (() -> Void)?
     /// Lets the owner drop the outside-click monitor once the shelf is gone.
@@ -396,8 +397,9 @@ final class ShelfPanel: FloatingPanel {
     @objc private func clicked(_ sender: NSButton) {
         guard sender.tag < items.count else { return }
         let item = items[sender.tag]
+        let frame = sender.window.map { SystemQueries.cgRect(fromCocoa: $0.convertToScreen(sender.convert(sender.bounds, to: nil))) }
         dismissAnimated { [weak self] in self?.onClosed?() }
-        onActivate?(item)
+        onActivate?(item, frame)
     }
 
     @objc private func openSettings() {

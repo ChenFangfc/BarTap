@@ -15,21 +15,21 @@
 
 <br>
 
-<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><img src="docs/media/bartap-preview-zh.webp" width="100%" alt="37 秒看懂 BarTap：塞满的菜单栏、一条分隔线收起图标、实时系统监控和 AI 用量、合盖不睡眠、视频下载"></a>
+<a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><img src="docs/media/bartap-preview-zh.webp" width="100%" alt="49 秒看懂 BarTap：塞满的菜单栏、一条分隔线收起图标、实时系统监控和 AI 用量、合盖不睡眠、视频下载、每一瓦电的去向，以及每一项背后的详情页"></a>
 
-<sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 带声音观看（0:37）</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ English</b></a></sub>
+<sub><a href="https://chenfangfc.github.io/BarTap/media/bartap-film-zh.mp4"><b>▶ 带声音观看（0:49）</b></a> · <a href="https://chenfangfc.github.io/BarTap/media/bartap-film-en.mp4"><b>▶ English</b></a></sub>
 
 </div>
 
 ---
 
-BarTap 把用不上的菜单栏图标收到一条分隔线后面，在菜单栏里实时显示 CPU、GPU、内存、磁盘、网络、传感器、电池和时间，还能显示你的 AI 编程工具用了多少。隐藏图标时它不伪造点击、不拦截输入、不瞬移指针，所以屏幕不会抽动。图标只在你要求时才移动：在「设置 › 布局」里排好，点「应用」，BarTap 替你完成 ⌘ 拖动，你一碰鼠标就立刻停下。
+BarTap 把用不上的菜单栏图标收到一条分隔线后面，在菜单栏里实时显示 CPU、GPU、内存、磁盘、网络、传感器、电池、用电和时间，看清每一瓦电的去向，还能显示你的 AI 编程工具用了多少。隐藏图标时它不伪造点击、不拦截输入、不瞬移指针，所以屏幕不会抽动。图标只在你要求时才移动：在「设置 › 布局」里排好，点「应用」，BarTap 替你完成 ⌘ 拖动，你一碰鼠标就立刻停下。
 
 ## 功能
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/bar-dark.webp">
-  <img src="docs/media/bar-light.webp" width="100%" alt="BarTap 开关与各项监控：CPU、GPU、内存、磁盘、网络、传感器、电池、AI 用量、时间">
+  <img src="docs/media/bar-light.webp" width="100%" alt="BarTap 开关与各项监控：CPU、GPU、内存、磁盘、网络、传感器、电池、用电、AI 用量、时间">
 </picture>
 
 **整理**

@@ -141,6 +141,14 @@ final class HoverClickPresenter {
         perform(model.click(on: id, now: now))
     }
 
+    /// Opens an item's details as a click would, hanging from `frame` (global CG): for an item
+    /// chosen somewhere else (the shelf, search) while it is hidden in the bar.
+    func openPinned(_ id: String, at frame: CGRect) {
+        if model.shown?.target == id { perform(model.dismiss()) }
+        lastHit = StatusItemHitTest.Hit(id: id, frame: frame, screenID: 0)
+        perform(model.click(on: id, now: now))
+    }
+
     /// Close the details for another reason (item removed, settings, an alert that needs the screen).
     func dismiss() { perform(model.dismiss()) }
 
