@@ -266,6 +266,21 @@ test("menu bar sections from Accessibility frames (macOS 26, three displays, not
     expect(!MenuBarSections.inMenuBar(CGRect(x: 0, y: 1116, width: 24, height: 24), of: screens[0]))
 }
 
+test("menu bar sections while the menu bar is automatically hidden") {
+    // With the bar hidden it isn't drawn, so Accessibility reports every extra one bar height
+    // above the display (measured: y = −28.5 on a 33 pt bar). Those icons are still in that bar.
+    let screen = ScreenInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1512, height: 982), menuBarHeight: 33)
+    let toggle = CGRect(x: 620, y: -28.5, width: 28.5, height: 24)
+    let hidden = CGRect(x: -4388, y: -28.5, width: 5002, height: 24)
+    let frames = [CGRect(x: 1250, y: -28.5, width: 34, height: 24),      // shown
+                  CGRect(x: -4658, y: -28.5, width: 34, height: 24),     // hidden
+                  CGRect(x: 0, y: 982, width: 36, height: 24)]           // parked off the bar
+    expect(MenuBarSections.inMenuBar(frames[0], of: screen), "an undrawn bar's icons are still in it")
+    let r = MenuBarSections.classify(frames, toggle: toggle, hidden: hidden, always: nil, screens: [screen])
+    expect(r[0]?.section == .shown && r[1]?.section == .hidden, "\(r)")
+    expect(r[2] == nil, "icons parked off the bar are still dropped")
+}
+
 test("reveal model: toggle and toggleAll") {
     var m = RevealModel()
     expect(m.effectiveLevel == .collapsed)
