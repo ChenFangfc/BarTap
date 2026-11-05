@@ -123,8 +123,10 @@ public enum ExtraSection: Equatable { case shown, hidden, alwaysHidden }
 public enum MenuBarSections {
     /// Whether a frame sits in a display's menu bar. macOS 26 reports extras a few points into the
     /// bar (y ≈ 3…6 on a 33 pt bar), so test the frame's vertical middle, not its top edge.
+    /// With "Automatically hide and show the menu bar" on, the bar isn't drawn and every extra is
+    /// reported one bar height above the display (y ≈ −28.5): that is the same bar, so allow it.
     public static func inMenuBar(_ f: CGRect, of s: ScreenInfo) -> Bool {
-        f.midY >= s.frame.minY - 2 && f.midY <= s.frame.minY + s.menuBarHeight + 2
+        f.midY >= s.frame.minY - s.menuBarHeight - 2 && f.midY <= s.frame.minY + s.menuBarHeight + 2
     }
 
     /// For each frame, its distance from the right edge of the bar that holds our toggle and its
